@@ -1,0 +1,7 @@
+[project]
+name = "biomodals"
+version = "0.1.0"
+description = "Run biomodelling tasks with Modal"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["modal>=1.2.1", "pyyaml>=6.0.3"]
