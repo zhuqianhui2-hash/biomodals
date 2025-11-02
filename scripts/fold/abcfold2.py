@@ -94,14 +94,21 @@ def download_boltz_models(force: bool = False) -> None:
 
     From: https://modal.com/docs/examples/boltz_predict.
     """
+    import tarfile
+
     from huggingface_hub import snapshot_download
 
     snapshot_download(
         repo_id="boltz-community/boltz-2",
         revision=BOLTZ_MODEL_HASH,
-        local_dir=BOLTZ_DIR,
+        local_dir=BOLTZ_MODEL_DIR,
         force_download=force,
     )
+    tar_mols = Path(BOLTZ_MODEL_DIR) / "mols.tar"
+    if not (Path(BOLTZ_MODEL_DIR) / "mols").exists():
+        with tarfile.open(str(tar_mols), "r") as tar:
+            tar.extractall(BOLTZ_MODEL_DIR)  # noqa: S202
+
     BOLTZ_VOLUME.commit()
 
 
@@ -156,7 +163,41 @@ async def download_chai_models(force=False):
 
 
 @app.function(
-    gpu=GPU,
+    image=runtime_image,
+    volumes={OUTPUTS_DIR: OUTPUTS_VOLUME, BOLTZ_MODEL_DIR: BOLTZ_VOLUME},
+)
+def prepare_abcfold2(yaml_str: str, run_id: str) -> None:
+    """Prepare inputs to Boltz and Chai using ABCFold2 config."""
+    import tempfile
+
+    from abcfold.cli.prepare import prepare_boltz, prepare_chai, search_msa
+
+    out_dir_full: Path = Path(OUTPUTS_DIR) / run_id[:6] / run_id
+    out_dir_full.mkdir(parents=True, exist_ok=True)
+    yaml_path = Path(out_dir_full) / f"{run_id}.yaml"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_yaml_path = Path(tmpdir) / f"{run_id}.yaml"
+        tmp_yaml_path.write_text(yaml_str)
+
+        # Run MSA and template search
+        if not yaml_path.exists():
+            search_msa(
+                conf_file=tmp_yaml_path,
+                out_dir=out_dir_full,
+                force=True,
+                template_cache_dir=f"{OUTPUTS_DIR}/.cache/rcsb",
+            )
+
+    # Generate inputs for Boltz and Chai
+    prepare_boltz(conf_file=yaml_path, out_dir=out_dir_full)
+    prepare_chai(
+        conf_file=yaml_path,
+        out_dir=out_dir_full,
+        ccd_lib_dir=Path(BOLTZ_MODEL_DIR) / "mols",
+    )
+
+
+@app.function(
     image=runtime_image,
     volumes={
         OUTPUTS_DIR: OUTPUTS_VOLUME,
@@ -180,24 +221,29 @@ def run_abcfold2(yaml_str: str, run_id: str) -> None:
 
 @app.local_entrypoint()
 def main(
-    input_yaml: str, run_name: str | None = None, force_redownload: bool = False
+    input_yaml: str,
+    run_name: str | None = None,
+    download_models: bool = False,
+    force_redownload: bool = False,
 ) -> None:
     """Run BoltzGen locally with results saved to out_dir.
 
     Args:
         input_yaml: Path to YAML design specification file
         run_name: Optional run name (defaults to timestamp)
+        download_models: Whether to download model weights before running
         force_redownload: Whether to force re-download of model weights
     """
     import hashlib
     from datetime import datetime
     from uuid import uuid4
 
-    print("🧬 Checking Boltz inference dependencies...")
-    download_boltz_models.remote(force=force_redownload)
+    if download_models:
+        print("🧬 Checking Boltz inference dependencies...")
+        download_boltz_models.remote(force=force_redownload)
 
-    print("🧬 Checking Chai inference dependencies...")
-    download_chai_models.remote(force=force_redownload)
+        print("🧬 Checking Chai inference dependencies...")
+        download_chai_models.remote(force=force_redownload)
 
     today: str = datetime.now(UTC).strftime("%Y%m%d%H%M")
     if run_name is None:
@@ -208,4 +254,4 @@ def main(
 
     yaml_path = Path(input_yaml).expanduser().resolve()
     yaml_str = yaml_path.read_text()
-    run_abcfold2.remote(yaml_str=yaml_str, run_id=run_id)
+    prepare_abcfold2.remote(yaml_str=yaml_str, run_id=run_id)
