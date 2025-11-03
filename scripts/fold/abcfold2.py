@@ -1,4 +1,20 @@
-"""Run ABCFold on Modal GPU instances."""
+"""Run ABCFold on Modal GPU instances.
+
+Ephemeral usage example:
+
+    ```bash
+    modal run scripts/fold/abcfold2.py --input-yaml path/to/example.yaml
+    ```
+
+Deployment usage example:
+    https://modal.com/docs/guide/managing-deployments
+
+    ```bash
+    modal deploy scripts/fold/abcfold2.py --name ABCFold2
+    ```
+
+    See `clients/fold/abcfold2.py` for example client code to call the deployed app.
+"""
 # Ignore ruff warnings about import location and unsafe subprocess usage
 # ruff: noqa: PLC0415, S603
 
@@ -223,6 +239,7 @@ def prepare_abcfold2(
                 force=True,
                 template_cache_dir=Path(OUTPUTS_DIR) / ".cache" / "rcsb",
             )
+            OUTPUTS_VOLUME.commit()
 
     # Generate inputs for Boltz and Chai
     _ = prepare_boltz(conf_file=yaml_path, out_dir=out_dir_full)
@@ -291,6 +308,7 @@ def run_abcfold2_boltz(
         num_diffn_samples=num_diffn_samples,
         boltz_additional_cli_args=boltz_additional_cli_args,
     )
+    OUTPUTS_VOLUME.commit()
     return package_outputs(str(boltz_run_dir))
 
 
@@ -335,7 +353,7 @@ def run_abcfold2_chai(
         num_diffn_samples=num_diffn_samples,
         num_trunk_samples=num_trunk_samples,
     )
-
+    OUTPUTS_VOLUME.commit()
     return package_outputs(str(chai_run_dir))
 
 
