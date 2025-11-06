@@ -24,6 +24,8 @@ from pathlib import Path
 
 from modal import App, Image, Volume
 
+from biomodals.utils import package_outputs
+
 ##########################################
 # Modal configs
 # T4: 16GB, L4: 24GB, A10G: 24GB, L40S: 48GB, A100-40G, A100-80G, H100: 80GB
@@ -253,19 +255,6 @@ def prepare_abcfold2(
     conf = load_params_from_run_yaml(yaml_path)
     conf["workdir"] = str(out_dir_full)
     return conf
-
-
-def package_outputs(output_dir: str) -> bytes:
-    """Package output directory into a tar.gz archive and return as bytes."""
-    import io
-    import tarfile
-
-    tar_buffer = io.BytesIO()
-    out_path = Path(output_dir)
-    with tarfile.open(fileobj=tar_buffer, mode="w:gz", compresslevel=6) as tar:
-        tar.add(out_path, arcname=out_path.name)
-
-    return tar_buffer.getvalue()
 
 
 @app.function(
