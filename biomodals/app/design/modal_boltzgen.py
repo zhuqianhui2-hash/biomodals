@@ -11,7 +11,7 @@ from modal import App, Image, Volume
 ##########################################
 # https://modal.com/docs/guide/gpu
 GPU = os.environ.get("GPU", "L40S")
-TIMEOUT = int(os.environ.get("TIMEOUT", "120"))  # for inputs and startup in seconds
+TIMEOUT = int(os.environ.get("TIMEOUT", "1200"))  # for inputs and startup in seconds
 
 # Volume for model cache
 BOLTZGEN_VOLUME_NAME = "boltzgen-models"
@@ -30,12 +30,6 @@ BOLTZGEN_REPO_DIR = "/opt/boltzgen"
 
 ##########################################
 
-download_image = (
-    Image.debian_slim()
-    .pip_install("huggingface_hub[hf_transfer]==0.26.3")
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})  # speed up downloads
-)
-
 runtime_image = (
     Image.debian_slim()
     .apt_install("git", "build-essential", "wget")
@@ -45,6 +39,7 @@ runtime_image = (
             # https://modal.com/docs/guide/cuda
             "UV_TORCH_BACKEND": "cu128",  # find best torch and CUDA versions
             "HF_HOME": str(BOLTZGEN_MODEL_DIR),  # store boltzgen model weights
+            "HF_HUB_ENABLE_HF_TRANSFER": "1",  # speed up downloads
         }
     )
     .run_commands(
@@ -65,25 +60,43 @@ runtime_image = (
 app = App("BoltzGen", image=runtime_image)
 
 
+def package_outputs(output_dir: str) -> bytes:
+    """Package output directory into a tar.gz archive and return as bytes."""
+    import io
+    import tarfile
+    from pathlib import Path
+
+    tar_buffer = io.BytesIO()
+    out_path = Path(output_dir)
+    with tarfile.open(fileobj=tar_buffer, mode="w:gz", compresslevel=6) as tar:
+        tar.add(out_path, arcname=out_path.name)
+
+    return tar_buffer.getvalue()
+
+
 @app.function(
-    volumes={BOLTZGEN_MODEL_DIR: BOLTZGEN_VOLUME}, timeout=TIMEOUT, image=download_image
+    volumes={BOLTZGEN_MODEL_DIR: BOLTZGEN_VOLUME}, timeout=TIMEOUT, image=runtime_image
 )
 def boltzgen_download(force: bool = False) -> None:
     """Download BoltzGen models into the mounted volume."""
-    import subprocess
+    import subprocess as sp
 
     # Download all artifacts (~/.cache overridden to volume mount)
     print("Downloading boltzgen models...")
     cmd = ["boltzgen", "download", "all", "--cache", BOLTZGEN_MODEL_DIR]
     if force:
         cmd.append("--force_download")
-    subprocess.run(cmd, check=True, cwd=BOLTZGEN_REPO_DIR)
+    sp.Popen(
+        cmd, stdout=sp.PIPE, stderr=sp.STDOUT, encoding="utf-8", cwd=BOLTZGEN_REPO_DIR
+    )
     print("Model download complete")
 
     BOLTZGEN_VOLUME.commit()
 
 
-@app.function(timeout=TIMEOUT, volumes={OUTPUTS_DIR: OUTPUTS_VOLUME})
+@app.function(
+    timeout=TIMEOUT, volumes={OUTPUTS_DIR: OUTPUTS_VOLUME}, image=runtime_image
+)
 def prepare_boltzgen_run(
     yaml_content: bytes, run_name: str, additional_files: dict[str, bytes]
 ) -> None:
@@ -104,30 +117,51 @@ def prepare_boltzgen_run(
         file_path.write_bytes(content)
 
 
-@app.function(cpu=1.0, timeout=TIMEOUT, volumes={OUTPUTS_DIR: OUTPUTS_VOLUME})
-def collect_boltzgen_data(run_name: str, num_parallel_runs: int):
+@app.function(
+    cpu=1.0, timeout=TIMEOUT, volumes={OUTPUTS_DIR: OUTPUTS_VOLUME}, image=runtime_image
+)
+def collect_boltzgen_data(
+    run_name: str,
+    num_parallel_runs: int,
+    protocol: str = "nanobody-anything",
+    num_designs: int = 10,
+    steps: str | None = None,
+    extra_args: str | None = None,
+):
     """Collect BoltzGen output data from multiple runs."""
     from uuid import uuid4
 
-    workdir = Path(OUTPUTS_DIR) / run_name
+    workdir = Path(OUTPUTS_DIR) / run_name / "outputs"
     run_ids = [uuid4().hex for _ in range(num_parallel_runs)]
 
     # TODO: submit tasks to `boltzgen_run` and collect outputs
+    run_dirs = [workdir / run_id for run_id in run_ids]
+    kwargs = {
+        "input_yaml_path": workdir.parent / "inputs" / "config" / "design-specs.yaml",
+        "protocol": protocol,
+        "num_designs": num_designs,
+        "steps": steps,
+        "extra_args": extra_args,
+    }
+    for boltzgen_dir in boltzgen_run.map(run_dirs, kwargs=kwargs):
+        print(f"BoltzGen run completed: {boltzgen_dir}")
+    return package_outputs(str(workdir))
 
 
 @app.function(
     gpu=GPU,
-    timeout=TIMEOUT,
+    timeout=86400,
     volumes={OUTPUTS_DIR: OUTPUTS_VOLUME, BOLTZGEN_MODEL_DIR: BOLTZGEN_VOLUME},
+    image=runtime_image,
 )
 def boltzgen_run(
     out_dir: str | Path,
     input_yaml_path: str | Path,
-    protocol: str = "protein-anything",
+    protocol: str = "nanobody-anything",
     num_designs: int = 10,
     steps: str | None = None,
     extra_args: str | None = None,
-) -> list:
+) -> str:
     """Run BoltzGen on a yaml specification.
 
     Args:
@@ -140,9 +174,11 @@ def boltzgen_run(
 
     Returns:
     -------
-        List of (path, content) tuples for all output files
+        Path to output directory as string.
     """
-    from subprocess import run
+    import subprocess as sp
+    import time
+    from datetime import UTC, datetime
 
     # Build command
     cmd = [
@@ -152,9 +188,11 @@ def boltzgen_run(
         "--protocol",
         protocol,
         "--output",
-        out_dir,
+        str(out_dir),
         "--num_designs",
         str(num_designs),
+        "--cache",
+        str(BOLTZGEN_MODEL_DIR),
     ]
 
     if steps:
@@ -162,8 +200,38 @@ def boltzgen_run(
     if extra_args:
         cmd.extend(extra_args.split())
 
-    print(f"Running: {' '.join(cmd)}")
-    run(cmd, check=True, cwd=BOLTZGEN_REPO_DIR)
+    log_dir = Path(out_dir).parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{out_dir.stem}.log"
+    print(f"Running BoltzGen, saving logs to {log_path}")
+    with (
+        sp.Popen(
+            cmd,
+            stdout=sp.PIPE,
+            stderr=sp.STDOUT,
+            encoding="utf-8",
+            cwd=BOLTZGEN_REPO_DIR,
+        ) as p,
+        open(log_path, "w") as log_file,
+    ):
+        now = time.time()
+        log_file.write(f"Time: {str(datetime.now(UTC))}\n")
+        log_file.write(f"Running command: {' '.join(cmd)}\n\n")
+
+        while (buffered_output := p.stdout.readline()) != "" or p.poll() is None:
+            log_file.write(buffered_output)  # not realtime without volume commit
+            log_file.flush()
+            print(buffered_output)
+
+        log_file.write(f"\nFinished at: {str(datetime.now(UTC))}\n")
+        log_file.write(f"Elapsed time: {time.time() - now:.2f} seconds\n")
+
+        if p.returncode != 0:
+            print(f"BoltzGen run failed. Error log is in {log_path}")
+            raise sp.CalledProcessError(p.returncode, cmd)
+
+    OUTPUTS_VOLUME.commit()
+    return str(out_dir)
 
 
 class YAMLReferenceLoader:
@@ -258,7 +326,7 @@ class YAMLReferenceLoader:
 
 def submit_boltzgen_task(
     input_yaml: str,
-    out_dir: str | Path | None = None,
+    out_dir: str | None = None,
     num_parallel_runs: int = 1,
     download_models: bool = False,
     force_redownload: bool = False,
@@ -301,12 +369,6 @@ def submit_boltzgen_task(
     today: str = datetime.now(UTC).strftime("%Y%m%d")
     run_name = f"{today}-{yaml_path.stem}"
 
-    if out_dir is None:
-        out_dir = Path.cwd()
-
-    local_out_dir = Path(out_dir).expanduser().resolve() / run_name
-    local_out_dir.mkdir(parents=True, exist_ok=True)
-
     prepare_boltzgen_run.remote(
         yaml_content=yaml_str,
         run_name=run_name,
@@ -314,12 +376,19 @@ def submit_boltzgen_task(
     )
 
     print("Running BoltzGen...")
-    outputs = boltzgen_run.remote()
-
-    for out_file, out_content in outputs:
-        output_path = local_out_dir / out_file
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(out_content)
+    outputs = collect_boltzgen_data.remote(
+        run_name=run_name,
+        num_parallel_runs=num_parallel_runs,
+        protocol=protocol,
+        num_designs=num_designs,
+        steps=steps,
+        extra_args=extra_args,
+    )
+    if out_dir is None:
+        out_dir = Path.cwd()
+    local_out_dir = Path(out_dir).expanduser().resolve()
+    local_out_dir.mkdir(parents=True, exist_ok=True)
+    (local_out_dir / f"{run_name}.tar.gz").write_bytes(outputs)
 
     print(f"Results saved to: {local_out_dir}")
 
