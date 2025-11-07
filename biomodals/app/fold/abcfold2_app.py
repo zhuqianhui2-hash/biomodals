@@ -48,7 +48,7 @@ OUTPUTS_DIR = "/abcfold2-outputs"
 # Repositories and commit hashes
 ABCFOLD_DIR = "/opt/ABCFold"
 ABCFOLD_REPO = "https://github.com/y1zhou/ABCFold"
-ABCFOLD_COMMIT = "75630348b861258746a1f2832c1537ef14c45671"
+ABCFOLD_COMMIT = "6b8c50ac5e3d38809e3f7b0c55a95397cfd15927"
 
 CHAI_DIR = "/opt/chai-lab"
 CHAI_REPO = "https://github.com/y1zhou/chai-lab"
@@ -70,7 +70,7 @@ download_image = (
 
 runtime_image = (
     Image.debian_slim()
-    .apt_install("git", "build-essential", "kalign")  # kalign for Chai templates
+    .apt_install("git", "build-essential")
     .env(
         {
             # "UV_COMPILE_BYTECODE": "1",  # slower image build, faster runtime
@@ -101,6 +101,10 @@ runtime_image = (
         )
     )
     .env({"PATH": f"{ABCFOLD_DIR}/.venv/bin:$PATH"})
+    .apt_install(
+        "kalign",  # for Chai templates
+        "zstd",  # for packaging outputs
+    )
     .workdir(ABCFOLD_DIR)
 )
 
@@ -110,18 +114,19 @@ app = App("ABCFold2", image=runtime_image)
 ##########################################
 # Helper functions
 ##########################################
-def package_outputs(output_dir: str) -> bytes:
-    """Package output directory into a tar.gz archive and return as bytes."""
-    import io
-    import tarfile
+def package_outputs(dir: str, tar_args: list[str] | None = None) -> bytes:
+    """Package directory into a tar.zst archive and return as bytes."""
+    import subprocess as sp
     from pathlib import Path
 
-    tar_buffer = io.BytesIO()
-    out_path = Path(output_dir)
-    with tarfile.open(fileobj=tar_buffer, mode="w:gz", compresslevel=6) as tar:
-        tar.add(out_path, arcname=out_path.name)
+    dir_path = Path(dir)
+    cmd = ["tar", "--zstd"]
+    if tar_args is not None:
+        cmd.extend(tar_args)
+    cmd.extend(["-cf", "-", dir_path.name])
 
-    return tar_buffer.getvalue()
+    result = sp.run(cmd, capture_output=True, check=True, cwd=dir_path.parent)  # noqa: S603
+    return result.stdout
 
 
 ##########################################
@@ -296,6 +301,8 @@ def collect_abcfold2_boltz_data(
     run_id = work_path.stem
     work_path = work_path / f"boltz_{run_id}"
     boltz_conf_path = work_path / f"{run_id}.yaml"
+    OUTPUTS_VOLUME.reload()
+
     if not boltz_conf_path.exists():
         raise FileNotFoundError(f"Boltz config file not found: {boltz_conf_path}")
 
@@ -312,7 +319,19 @@ def collect_abcfold2_boltz_data(
             print(f"Boltz run complete: {boltz_run_dir}")
 
     OUTPUTS_VOLUME.reload()
-    return package_outputs(str(work_path))
+    return package_outputs(
+        str(work_path),
+        [
+            "--exclude",
+            "boltz_msa",
+            "--exclude",
+            "lightning_logs",
+            "--exclude",
+            "processed",
+            "--exclude",
+            "msa",
+        ],
+    )
 
 
 @app.function(
@@ -371,6 +390,8 @@ def collect_abcfold2_chai_data(
     run_id = work_path.stem
     work_path = work_path / f"chai_{run_id}"
     chai_conf_path = work_path / f"{run_id}.yaml"
+    OUTPUTS_VOLUME.reload()
+
     if not chai_conf_path.exists():
         raise FileNotFoundError(f"Chai config file not found: {chai_conf_path}")
 
@@ -486,7 +507,7 @@ def submit_abcfold2_task(
 
     # Run Boltz for each seed
     if run_boltz:
-        out_path = local_out_dir / f"boltz_{run_id}.tar.gz"
+        out_path = local_out_dir / f"boltz_{run_id}.tar.zst"
         print(f"🧬 Running Boltz and collecting results to {out_path}")
         boltz_data = collect_abcfold2_boltz_data.remote(run_conf=run_conf)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -494,7 +515,7 @@ def submit_abcfold2_task(
 
     # Run Chai for each seed
     if run_chai:
-        out_path = local_out_dir / f"chai_{run_id}.tar.gz"
+        out_path = local_out_dir / f"chai_{run_id}.tar.zst"
         print(f"🧬 Running Chai and collecting results to {out_path}")
         chai_data = collect_abcfold2_chai_data.remote(run_conf=run_conf)
         out_path.parent.mkdir(parents=True, exist_ok=True)

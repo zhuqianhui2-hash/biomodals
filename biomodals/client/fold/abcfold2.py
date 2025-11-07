@@ -75,7 +75,7 @@ def submit_abcfold2_task(
 
     # Run Boltz for each seed
     if run_boltz:
-        out_path = local_out_dir / f"boltz_{run_id}.tar.gz"
+        out_path = local_out_dir / f"boltz_{run_id}.tar.zst"
         print(f"🧬 Running Boltz and collecting results to {out_path}")
         boltz_data = collect_abcfold2_boltz_data.remote(run_conf=run_conf)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,7 +83,7 @@ def submit_abcfold2_task(
 
     # Run Chai for each seed
     if run_chai:
-        out_path = local_out_dir / f"chai_{run_id}.tar.gz"
+        out_path = local_out_dir / f"chai_{run_id}.tar.zst"
         print(f"🧬 Running Chai and collecting results to {out_path}")
         chai_data = collect_abcfold2_chai_data.remote(run_conf=run_conf)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,4 +93,4 @@ def submit_abcfold2_task(
 
 
 if __name__ == "__main__":
-    print("Use 'run_abcfold2(\"path/to/example.yaml\")' to submit tasks.")
+    print("Use 'submit_abcfold2_task(\"path/to/example.yaml\")' to submit tasks.")
