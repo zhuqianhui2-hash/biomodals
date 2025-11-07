@@ -35,7 +35,7 @@ BOLTZGEN_REPO_DIR = "/opt/boltzgen"
 ##########################################
 runtime_image = (
     Image.debian_slim()
-    .apt_install("git", "build-essential", "wget")
+    .apt_install("git", "build-essential", "zstd")
     .env(
         {
             # "UV_COMPILE_BYTECODE": "1",  # slower image build, faster runtime
@@ -66,8 +66,12 @@ app = App("BoltzGen", image=runtime_image)
 ##########################################
 # Helper functions
 ##########################################
-def package_outputs(root: str | Path, paths_to_bundle: Iterable[str | Path]) -> bytes:
-    """Package directories into a tar.gz archive and return as bytes.
+def package_outputs(
+    root: str | Path,
+    paths_to_bundle: Iterable[str | Path],
+    tar_args: list[str] | None = None,
+) -> bytes:
+    """Package directories into a tar.zst archive and return as bytes.
 
     We make an assumption here that all paths to bundle are under the same root.
     This should be safe for `collect_boltzgen_data` usage.
@@ -75,22 +79,28 @@ def package_outputs(root: str | Path, paths_to_bundle: Iterable[str | Path]) -> 
     Args:
         root: Root directory in the archive. All paths will be relative to this.
         paths_to_bundle: Specific paths (relative to root) to include in the archive.
+        tar_args: Additional arguments to pass to `tar`.
     """
-    import io
-    import tarfile
+    import subprocess as sp
     from pathlib import Path
 
-    tar_buffer = io.BytesIO()
     root_path = Path(root)  # don't resolve, as the mapped location could be a soft link
-    with tarfile.open(fileobj=tar_buffer, mode="w:gz", compresslevel=6) as tar:
-        for p in paths_to_bundle:
-            out_path = root_path.joinpath(p)
-            if out_path.exists():
-                tar.add(out_path, arcname=out_path.relative_to(root_path.parent))
-            else:
-                print(f"Warning: path {out_path} does not exist and will be skipped.")
+    cmd = ["tar", "--zstd"]
+    if tar_args is not None:
+        cmd.extend(tar_args)
+    cmd.extend(["-cf", "-"])
 
-    return tar_buffer.getvalue()
+    # Our volume file structure is: outputs/[run_id]/...
+    # We want to preserve the relative paths
+    for p in paths_to_bundle:
+        out_path = root_path.joinpath(p)
+        if out_path.exists():
+            cmd.append(out_path.relative_to(root_path.parent))
+        else:
+            print(f"Warning: path {out_path} does not exist and will be skipped.")
+
+    result = sp.run(cmd, capture_output=True, check=True, cwd=root_path.parent)  # noqa: S603
+    return result.stdout
 
 
 class YAMLReferenceLoader:
@@ -233,7 +243,7 @@ def prepare_boltzgen_run(
 
 
 @app.function(
-    cpu=1.0, timeout=TIMEOUT, volumes={OUTPUTS_DIR: OUTPUTS_VOLUME}, image=runtime_image
+    cpu=1.0, timeout=86400, volumes={OUTPUTS_DIR: OUTPUTS_VOLUME}, image=runtime_image
 )
 def collect_boltzgen_data(
     run_name: str,
@@ -242,7 +252,7 @@ def collect_boltzgen_data(
     num_designs: int = 10,
     steps: str | None = None,
     extra_args: str | None = None,
-):
+) -> bytes:
     """Collect BoltzGen output data from multiple runs."""
     from uuid import uuid4
 
@@ -418,6 +428,6 @@ def submit_boltzgen_task(
         out_dir = Path.cwd()
     local_out_dir = Path(out_dir).expanduser().resolve()
     local_out_dir.mkdir(parents=True, exist_ok=True)
-    (local_out_dir / f"{run_name}.tar.gz").write_bytes(outputs)
+    (local_out_dir / f"{run_name}.tar.zst").write_bytes(outputs)
 
     print(f"Results saved to: {local_out_dir}")
