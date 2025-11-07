@@ -19,13 +19,13 @@ Deployment usage example:
 # ruff: noqa: PLC0415, S603
 
 import os
-from datetime import UTC
 from pathlib import Path
 
 from modal import App, Image, Volume
 
 ##########################################
 # Modal configs
+##########################################
 # T4: 16GB, L4: 24GB, A10G: 24GB, L40S: 48GB, A100-40G, A100-80G, H100: 80GB
 # https://modal.com/docs/guide/gpu
 GPU = os.environ.get("GPU", "A10G")
@@ -58,8 +58,10 @@ BOLTZ_DIR = "/opt/boltz"
 BOLTZ_REPO = "https://github.com/jwohlwend/boltz"
 BOLTZ_COMMIT = "cb04aeccdd480fd4db707f0bbafde538397fa2ac"
 BOLTZ_MODEL_HASH = "6fdef46d763fee7fbb83ca5501ccceff43b85607"  # HF revision
-##########################################
 
+##########################################
+# Image and app definitions
+##########################################
 download_image = (
     Image.debian_slim()
     .pip_install("huggingface_hub[hf_transfer]==0.26.3")
@@ -105,6 +107,26 @@ runtime_image = (
 app = App("ABCFold2", image=runtime_image)
 
 
+##########################################
+# Helper functions
+##########################################
+def package_outputs(output_dir: str) -> bytes:
+    """Package output directory into a tar.gz archive and return as bytes."""
+    import io
+    import tarfile
+    from pathlib import Path
+
+    tar_buffer = io.BytesIO()
+    out_path = Path(output_dir)
+    with tarfile.open(fileobj=tar_buffer, mode="w:gz", compresslevel=6) as tar:
+        tar.add(out_path, arcname=out_path.name)
+
+    return tar_buffer.getvalue()
+
+
+##########################################
+# Fetch model weights
+##########################################
 @app.function(
     volumes={BOLTZ_MODEL_DIR: BOLTZ_VOLUME}, timeout=TIMEOUT, image=download_image
 )
@@ -190,6 +212,9 @@ async def download_chai_models(force=False):
     CHAI_VOLUME.commit()  # ensures models are visible on remote filesystem before exiting, otherwise takes a few seconds, racing with inference
 
 
+##########################################
+# Inference functions
+##########################################
 def load_params_from_run_yaml(yaml_path: Path) -> dict:
     """Load run parameters from ABCFold2 YAML config."""
     from abcfold.schema import load_abcfold_config
@@ -255,20 +280,6 @@ def prepare_abcfold2(
     return conf
 
 
-def package_outputs(output_dir: str) -> bytes:
-    """Package output directory into a tar.gz archive and return as bytes."""
-    import io
-    import tarfile
-    from pathlib import Path
-
-    tar_buffer = io.BytesIO()
-    out_path = Path(output_dir)
-    with tarfile.open(fileobj=tar_buffer, mode="w:gz", compresslevel=6) as tar:
-        tar.add(out_path, arcname=out_path.name)
-
-    return tar_buffer.getvalue()
-
-
 @app.function(
     cpu=1.0,
     image=runtime_image,
@@ -296,7 +307,9 @@ def collect_abcfold2_boltz_data(
             seeds_to_run.append(seed)
 
     if seeds_to_run:
-        run_abcfold2_boltz.map(seeds_to_run, kwargs=run_conf)
+        # modal function map results need to be consumed to actually run
+        for boltz_run_dir in run_abcfold2_boltz.map(seeds_to_run, kwargs=run_conf):
+            print(f"Boltz run complete: {boltz_run_dir}")
 
     return package_outputs(str(work_path))
 
@@ -368,7 +381,9 @@ def collect_abcfold2_chai_data(
             seeds_to_run.append(seed)
 
     if seeds_to_run:
-        run_abcfold2_chai.map(seeds_to_run, kwargs=run_conf)
+        # modal function map results need to be consumed to actually run
+        for chai_run_dir in run_abcfold2_chai.map(seeds_to_run, kwargs=run_conf):
+            print(f"Chai run complete: {chai_run_dir}")
 
     return package_outputs(str(work_path))
 
@@ -414,6 +429,10 @@ def run_abcfold2_chai(
     return str(chai_run_dir)
 
 
+##########################################
+# Entrypoint for ephemeral usage
+##########################################
+@app.local_entrypoint()
 def run_abcfold2(
     input_yaml: str,
     run_name: str | None = None,
@@ -433,7 +452,8 @@ def run_abcfold2(
         run_chai: Whether to run Chai inference
     """
     import hashlib
-    from datetime import datetime
+    from datetime import UTC, datetime
+    from pathlib import Path
 
     if download_models:
         print("🧬 Checking Boltz inference dependencies...")
@@ -475,6 +495,3 @@ def run_abcfold2(
         out_path.write_bytes(chai_data)
 
     print(f"🧬 ABCFold2 run complete! Results saved to {local_out_dir}")
-
-
-main = app.local_entrypoint()(run_abcfold2)
