@@ -311,6 +311,7 @@ def collect_abcfold2_boltz_data(
         for boltz_run_dir in run_abcfold2_boltz.map(seeds_to_run, kwargs=run_conf):
             print(f"Boltz run complete: {boltz_run_dir}")
 
+    OUTPUTS_VOLUME.reload()
     return package_outputs(str(work_path))
 
 
@@ -385,6 +386,7 @@ def collect_abcfold2_chai_data(
         for chai_run_dir in run_abcfold2_chai.map(seeds_to_run, kwargs=run_conf):
             print(f"Chai run complete: {chai_run_dir}")
 
+    OUTPUTS_VOLUME.reload()
     return package_outputs(str(work_path))
 
 
@@ -433,8 +435,9 @@ def run_abcfold2_chai(
 # Entrypoint for ephemeral usage
 ##########################################
 @app.local_entrypoint()
-def run_abcfold2(
+def submit_abcfold2_task(
     input_yaml: str,
+    out_dir: str | None = None,
     run_name: str | None = None,
     download_models: bool = False,
     force_redownload: bool = False,
@@ -445,6 +448,7 @@ def run_abcfold2(
 
     Args:
         input_yaml: Path to YAML design specification file
+        out_dir: Optional output directory (defaults to $CWD)
         run_name: Optional run name (defaults to timestamp-{input file hash})
         download_models: Whether to download model weights before running
         force_redownload: Whether to force re-download of model weights
@@ -471,7 +475,9 @@ def run_abcfold2(
     if run_name is None:
         run_name = run_id[:8]  # short id
 
-    local_out_dir = Path.cwd() / f"{today}-{run_name}"
+    if out_dir is None:
+        out_dir = Path.cwd()
+    local_out_dir = Path(out_dir) / f"{today}-{run_name}"
     if local_out_dir.exists():
         raise FileExistsError(f"Output directory already exists: {local_out_dir}")
 
