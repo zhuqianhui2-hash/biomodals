@@ -3,7 +3,7 @@
 # ruff: noqa: PLC0415, S603
 
 import os
-from datetime import UTC
+from collections.abc import Iterable
 from pathlib import Path
 
 from modal import App, Image, Volume
@@ -66,16 +66,29 @@ app = App("BoltzGen", image=runtime_image)
 ##########################################
 # Helper functions
 ##########################################
-def package_outputs(output_dir: str) -> bytes:
-    """Package output directory into a tar.gz archive and return as bytes."""
+def package_outputs(root: str | Path, paths_to_bundle: Iterable[str | Path]) -> bytes:
+    """Package directories into a tar.gz archive and return as bytes.
+
+    We make an assumption here that all paths to bundle are under the same root.
+    This should be safe for `collect_boltzgen_data` usage.
+
+    Args:
+        root: Root directory in the archive. All paths will be relative to this.
+        paths_to_bundle: Specific paths (relative to root) to include in the archive.
+    """
     import io
     import tarfile
     from pathlib import Path
 
     tar_buffer = io.BytesIO()
-    out_path = Path(output_dir)
+    root_path = Path(root)  # don't resolve, as the mapped location could be a soft link
     with tarfile.open(fileobj=tar_buffer, mode="w:gz", compresslevel=6) as tar:
-        tar.add(out_path, arcname=out_path.name)
+        for p in paths_to_bundle:
+            out_path = root_path.joinpath(p)
+            if out_path.exists():
+                tar.add(out_path, arcname=out_path.relative_to(root_path.parent))
+            else:
+                print(f"Warning: path {out_path} does not exist and will be skipped.")
 
     return tar_buffer.getvalue()
 
@@ -233,13 +246,12 @@ def collect_boltzgen_data(
     """Collect BoltzGen output data from multiple runs."""
     from uuid import uuid4
 
-    workdir = Path(OUTPUTS_DIR) / run_name / "outputs"
+    outdir = Path(OUTPUTS_DIR) / run_name / "outputs"
     run_ids = [uuid4().hex for _ in range(num_parallel_runs)]
 
-    # TODO: submit tasks to `boltzgen_run` and collect outputs
-    run_dirs = [workdir / run_id for run_id in run_ids]
+    run_dirs = [outdir / run_id for run_id in run_ids]
     kwargs = {
-        "input_yaml_path": workdir.parent / "inputs" / "config" / "design-specs.yaml",
+        "input_yaml_path": outdir.parent / "inputs" / "config" / "design-specs.yaml",
         "protocol": protocol,
         "num_designs": num_designs,
         "steps": steps,
@@ -247,7 +259,9 @@ def collect_boltzgen_data(
     }
     for boltzgen_dir in boltzgen_run.map(run_dirs, kwargs=kwargs):
         print(f"BoltzGen run completed: {boltzgen_dir}")
-    return package_outputs(str(workdir))
+
+    OUTPUTS_VOLUME.reload()
+    return package_outputs(outdir, run_ids)
 
 
 @app.function(
@@ -302,9 +316,9 @@ def boltzgen_run(
     if extra_args:
         cmd.extend(extra_args.split())
 
-    log_dir = Path(out_dir).parent / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{out_dir.stem}.log"
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    log_path = out_path / "boltzgen-run.log"
     print(f"Running BoltzGen, saving logs to {log_path}")
     with (
         sp.Popen(
@@ -314,7 +328,7 @@ def boltzgen_run(
             encoding="utf-8",
             cwd=BOLTZGEN_REPO_DIR,
         ) as p,
-        open(log_path, "w") as log_file,
+        open(log_path, "w", buffering=1) as log_file,
     ):
         now = time.time()
         log_file.write(f"Time: {str(datetime.now(UTC))}\n")
@@ -322,7 +336,6 @@ def boltzgen_run(
 
         while (buffered_output := p.stdout.readline()) != "" or p.poll() is None:
             log_file.write(buffered_output)  # not realtime without volume commit
-            log_file.flush()
             print(buffered_output)
 
         log_file.write(f"\nFinished at: {str(datetime.now(UTC))}\n")
@@ -365,7 +378,8 @@ def submit_boltzgen_task(
         steps: Specific pipeline steps to run (e.g. "design inverse_folding")
         extra_args: Additional CLI arguments as string
     """
-    from datetime import datetime
+    from datetime import UTC, datetime
+    from pathlib import Path
 
     if download_models:
         boltzgen_download.remote(force=force_redownload)
