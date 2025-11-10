@@ -77,7 +77,7 @@ runtime_image = (
             # https://modal.com/docs/guide/cuda
             "UV_TORCH_BACKEND": "cu128",  # find best torch and CUDA versions
             "CHAI_DOWNLOADS_DIR": str(CHAI_MODEL_DIR),  # store chai model weights
-            "BOLTZ_CACHE_DIR": str(BOLTZ_MODEL_DIR),  # store boltz model weights
+            "BOLTZ_CACHE": str(BOLTZ_MODEL_DIR),  # store boltz model weights
         }
     )
     .run_commands(
