@@ -24,10 +24,6 @@ APP_NAME = os.environ.get("MODAL_APP", "AbNatiV")
 ABNATIV_VOLUME = Volume.from_name("abnativ-models", create_if_missing=True)
 ABNATIV_MODEL_DIR = "/root/.abnativ/models/pretrained_models"
 
-# Volume for outputs
-OUTPUTS_VOLUME = Volume.from_name("abnativ-outputs", create_if_missing=True, version=2)
-OUTPUTS_DIR = "/abnativ-outputs"
-
 ##########################################
 # Image and app definitions
 ##########################################
@@ -121,9 +117,9 @@ def download_abnativ_models(force: bool = False) -> None:
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     image=runtime_image,
     timeout=TIMEOUT,
-    volumes={ABNATIV_MODEL_DIR: ABNATIV_VOLUME, OUTPUTS_DIR: OUTPUTS_VOLUME},
+    volumes={ABNATIV_MODEL_DIR: ABNATIV_VOLUME.read_only()},
 )
-def collect_abnativ_scores_single(
+def abnativ_score_unpaired(
     fasta_bytes: bytes,
     output_id: str,
     nativeness_type: str,
@@ -134,52 +130,43 @@ def collect_abnativ_scores_single(
     plot_profiles: bool,
 ):
     """Manage AbNatiV runs and return all score results."""
-    from hashlib import sha256
+    from tempfile import TemporaryDirectory
 
-    input_hash = sha256(fasta_bytes).hexdigest()
+    with TemporaryDirectory() as tmpdir:
+        work_path = Path(tmpdir) / output_id
+        work_path.mkdir()
+        input_fasta = work_path.parent / f"{output_id}.fasta"
+        with open(input_fasta, "wb") as f:
+            f.write(fasta_bytes)
+        cmd = [
+            "abnativ",
+            "score",
+            "-nat",
+            nativeness_type,
+            "-i",
+            str(input_fasta),
+            "-odir",
+            str(work_path),
+            "--output_id",
+            output_id,
+            "--ncpu",
+            str(ncpu),
+        ]
+        if mean_score_only:
+            cmd.append("--mean_score_only")
+        if align_before_scoring:
+            cmd.append("--do_align")
+        if is_vhh:
+            cmd.append("--is_VHH")
+        if plot_profiles:
+            cmd.append("-plot")
 
-    work_path = Path(OUTPUTS_DIR) / input_hash / output_id
-    if work_path.exists() and any(work_path.iterdir()):
-        print(f"Output directory already exists, skipping run: {work_path}")
-        print("Packaging AbNatiV results...")
+        run_command(cmd)
+
+        print("Packaging results...")
         tarball_bytes = package_outputs(str(work_path))
         print("Packaging complete.")
-        return tarball_bytes
 
-    work_path.mkdir(parents=True, exist_ok=True)
-    input_fasta = work_path.parent / f"{output_id}.fasta"
-    with open(input_fasta, "wb") as f:
-        f.write(fasta_bytes)
-    cmd = [
-        "abnativ",
-        "score",
-        "-nat",
-        nativeness_type,
-        "-i",
-        str(input_fasta),
-        "-odir",
-        str(work_path),
-        "--output_id",
-        output_id,
-        "--ncpu",
-        str(ncpu),
-    ]
-    if mean_score_only:
-        cmd.append("--mean_score_only")
-    if align_before_scoring:
-        cmd.append("--do_align")
-    if is_vhh:
-        cmd.append("--is_VHH")
-    if plot_profiles:
-        cmd.append("-plot")
-
-    OUTPUTS_VOLUME.reload()
-    run_command(cmd)
-
-    OUTPUTS_VOLUME.commit()
-    print("Packaging results...")
-    tarball_bytes = package_outputs(str(work_path))
-    print("Packaging complete.")
     return tarball_bytes
 
 
@@ -188,12 +175,18 @@ def collect_abnativ_scores_single(
 ##########################################
 @app.local_entrypoint()
 def submit_abnativ_task(
-    input_fasta_or_seq: str,
+    # Inputs and outputs
     run_name: str,
     out_dir: str | None = None,
+    input_fasta_or_seq: str | None = None,
+    input_paired_csv: str | None = None,
+    input_vh_seq: str | None = None,
+    input_vl_seq: str | None = None,
+    # Model download options
     download_models: bool = False,
     force_redownload: bool = False,
-    nativeness_type: str = "VH",
+    # AbNatiV configs
+    model_type: str = "VH",
     mean_score_only: bool = False,
     align_before_scoring: bool = False,
     num_workers: int = 1,
@@ -205,59 +198,84 @@ def submit_abnativ_task(
     See `abnativ score -h` for details on input arguments.
 
     Args:
-        input_fasta_or_seq: Path to a FASTA file or a single-sequence string.
         run_name: Prefix used to name the output directory and files.
         out_dir: Local directory where the results are persisted; defaults to the current working directory.
+        input_fasta_or_seq: Path to a FASTA file or a single-sequence string.
+        input_paired_csv: (For paired model only) Path to a CSV file containing paired VH and VL sequences.
+            The CSV file should have columns "ID", "vh_seq", and "vl_seq".
+        input_vh_seq: (For paired model only) A single-sequence string for VH sequences.
+        input_vl_seq: (For paired model only) A single-sequence string for VL sequences.
         download_models: If True, download the AbNatiV models before inference.
         force_redownload: Force re-download of the models even if they already exist.
-        nativeness_type: Selects the AbNatiV trained model (VH, VKappa, VLambda, VHH), or AbNatiV2 models (VH2, VL2, VHH2).
+        model_type: Selects the AbNatiV trained model (VH, VKappa, VLambda, VHH), or AbNatiV2 models (VH2, VL2, VHH2).
+            If set to "paired", the paired V2 model will be used. `input_fasta_or_seq` will be ignored, and sequences
+            will be read from `input_{paired_csv, vh_seq, vl_seq}` instead.
         mean_score_only: When True, only export a per-sequence score file instead of both sequence and per-position nativeness profiles.
         align_before_scoring: Align and clean the sequences before scoring; can be slow for large sets.
+            If not set, all input sequences need to be Aho-numbered.
         num_workers: Number of workers to parallelize the alignment process.
         is_vhh: Use the VHH alignment seed, which is better for nanobody sequences.
         plot_profiles: Generate and save per-sequence profile plots under `{output_directory}/{output_id}_profiles`.
     """
-    # Load input and prepend ">A" if it is not a file path
-    input_path = Path(input_fasta_or_seq)
-    if input_path.exists():
-        with open(input_path, "rb") as f:
-            fasta_bytes = f.read()
-    else:
-        if "\n" in input_fasta_or_seq or " " in input_fasta_or_seq:
-            raise ValueError(
-                "Input sequence does not appear to be a valid file path. "
-                "Please provide a valid FASTA file path or a single-line sequence."
-            )
-        fasta_str = f">single_seq\n{input_fasta_or_seq.strip()}\n"
-        fasta_bytes = fasta_str.encode("utf-8")
-
-    if out_dir is None:
-        out_dir = Path.cwd()
-    local_out_dir = Path(out_dir)
-    local_out_dir.mkdir(parents=True, exist_ok=True)
-    out_zst_file = local_out_dir / f"{run_name}_abnativ_scores.tar.zst"
-    if out_zst_file.exists():
-        raise FileExistsError(f"Output file already exists: {out_zst_file}")
-
-    print("🧬 Starting AbNatiV run...")
-
+    # Ignore everything else if downloading models
     if download_models:
         print("🧬 Checking AbNatiV inference dependencies...")
         download_abnativ_models.remote(force=force_redownload)
+        return
 
-    print(f"🧬 Running AbNatiV and collecting results to {out_zst_file}")
-    abnativ_scores = collect_abnativ_scores_single.remote(
-        fasta_bytes=fasta_bytes,
-        output_id=run_name,
-        nativeness_type=nativeness_type,
-        mean_score_only=mean_score_only,
-        align_before_scoring=align_before_scoring,
-        ncpu=num_workers,
-        is_vhh=is_vhh,
-        plot_profiles=plot_profiles,
-    )
+    # Set up output paths
+    print("🧬 Starting AbNatiV run...")
+    if out_dir is None:
+        out_dir = Path.cwd()
+    local_out_dir = Path(out_dir).expanduser().resolve()
+    local_out_dir.mkdir(parents=True, exist_ok=True)
+    out_zst_file = local_out_dir / f"{run_name}_abnativ_{model_type}.tar.zst"
+    if out_zst_file.exists():
+        raise FileExistsError(f"Output file already exists: {out_zst_file}")
+
+    # Submit scoring job based on model type
+    match model_type:
+        case "paired":
+            raise NotImplementedError(
+                "Paired AbNatiV model not yet implemented in this Modal app."
+            )
+        case "VH" | "VKappa" | "VLambda" | "VHH" | "VH2" | "VL2" | "VHH2":
+            # Load fasta, or build one if it is not a file path
+            if input_fasta_or_seq is None:
+                raise ValueError(
+                    "input_fasta_or_seq must be provided for single-chain AbNatiV scoring."
+                )
+            input_path = Path(input_fasta_or_seq)
+            if input_path.exists():
+                with open(input_path, "rb") as f:
+                    fasta_bytes = f.read()
+            else:
+                if "\n" in input_fasta_or_seq or " " in input_fasta_or_seq:
+                    raise ValueError(
+                        "Input sequence does not appear to be a valid file path. "
+                        "Please provide a valid FASTA file path or a single-line sequence."
+                    )
+                fasta_str = f">single_seq\n{input_fasta_or_seq.strip()}\n"
+                fasta_bytes = fasta_str.encode("utf-8")
+
+            print(f"🧬 Running AbNatiV unpaired {model_type} mode...")
+            abnativ_scores = abnativ_score_unpaired.remote(
+                fasta_bytes=fasta_bytes,
+                output_id=run_name,
+                nativeness_type=model_type,
+                mean_score_only=mean_score_only,
+                align_before_scoring=align_before_scoring,
+                ncpu=num_workers,
+                is_vhh=is_vhh,
+                plot_profiles=plot_profiles,
+            )
+        case _:
+            raise ValueError(
+                f"Invalid model_type: {model_type}. Must be one of "
+                "'VH', 'VKappa', 'VLambda', 'VHH', 'VH2', 'VL2', 'VHH2', or 'paired'."
+            )
+
     out_zst_file.write_bytes(abnativ_scores)
-
     print(
         f"🧬 AbNatiV run complete! Results saved to {local_out_dir} in {out_zst_file.name}"
     )
