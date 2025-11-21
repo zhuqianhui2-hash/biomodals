@@ -33,7 +33,7 @@ OUTPUTS_DIR = "/abnativ-outputs"
 ##########################################
 runtime_image = (
     Image.micromamba(python_version="3.12")
-    .apt_install("git", "build-essential")
+    .apt_install("git", "build-essential", "wget")
     .env(
         {
             # "UV_COMPILE_BYTECODE": "1",  # slower image build, faster runtime
@@ -69,23 +69,41 @@ def package_outputs(
     )  # noqa: S603
 
 
+def run_command(cmd: list[str], **kwargs) -> None:
+    """Run a shell command and stream output to stdout."""
+    import subprocess as sp
+
+    print(f"Running command: {' '.join(cmd)}")
+    # Set default kwargs for sp.Popen
+    kwargs.setdefault("stdout", sp.PIPE)
+    kwargs.setdefault("stderr", sp.STDOUT)
+    kwargs.setdefault("bufsize", 1)
+    kwargs.setdefault("encoding", "utf-8")
+
+    with sp.Popen(cmd, **kwargs) as p:
+        while (buffered_output := p.stdout.readline()) != "" or p.poll() is None:
+            print(buffered_output, end="", flush=True)
+
+
 ##########################################
 # Fetch model weights
 ##########################################
-@app.function(volumes={ABNATIV_MODEL_DIR: ABNATIV_VOLUME}, timeout=TIMEOUT)
+@app.function(
+    cpu=(1.125, 16.125),
+    volumes={ABNATIV_MODEL_DIR: ABNATIV_VOLUME},
+    timeout=TIMEOUT * 10,
+)
 def download_abnativ_models(force: bool = False) -> None:
     """Download AbNatiV models into the mounted volume."""
-    import subprocess as sp
-
     # Download all artifacts
     print("Downloading AbNatiV models...")
     cmd = ["abnativ", "init"]
     if force:
         cmd.append("--force_update")
-    sp.Popen(cmd, stdout=sp.PIPE, stderr=sp.STDOUT, encoding="utf-8")
-    print("Model download complete")
 
+    run_command(cmd, bufsize=8)
     ABNATIV_VOLUME.commit()
+    print("Model download complete")
 
 
 ##########################################
@@ -110,7 +128,6 @@ def collect_abnativ_scores_single(
     plot_profiles: bool,
 ):
     """Manage AbNatiV runs and return all score results."""
-    import subprocess as sp
     from hashlib import sha256
 
     input_hash = sha256(fasta_bytes).hexdigest()
@@ -151,9 +168,7 @@ def collect_abnativ_scores_single(
         cmd.append("--plot")
 
     OUTPUTS_VOLUME.reload()
-    process = sp.run(cmd, capture_output=True, check=True)
-    print(process.stdout.decode("utf-8"))
-    print(process.stderr.decode("utf-8"))
+    run_command(cmd)
 
     OUTPUTS_VOLUME.commit()
     print("Packaging results...")
