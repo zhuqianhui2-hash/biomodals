@@ -33,7 +33,7 @@ OUTPUTS_DIR = "/abnativ-outputs"
 ##########################################
 runtime_image = (
     Image.micromamba(python_version="3.12")
-    .apt_install("git", "build-essential", "wget")
+    .apt_install("git", "build-essential", "wget", "zstd")
     .env(
         {
             # "UV_COMPILE_BYTECODE": "1",  # slower image build, faster runtime
@@ -56,6 +56,7 @@ def package_outputs(
     dir: str, tar_args: list[str] | None = None, num_threads: int = 16
 ) -> bytes:
     """Package directory into a tar.zst archive and return as bytes."""
+    import os
     import subprocess as sp
 
     dir_path = Path(dir)
@@ -65,7 +66,7 @@ def package_outputs(
     cmd.extend(["-cf", "-", dir_path.name])
 
     return sp.check_output(
-        cmd, cwd=dir_path.parent, env={"ZSTD_NBTHREADS": str(num_threads)}
+        cmd, cwd=dir_path.parent, env=os.environ | {"ZSTD_NBTHREADS": str(num_threads)}
     )  # noqa: S603
 
 
@@ -81,8 +82,13 @@ def run_command(cmd: list[str], **kwargs) -> None:
     kwargs.setdefault("encoding", "utf-8")
 
     with sp.Popen(cmd, **kwargs) as p:
-        while (buffered_output := p.stdout.readline()) != "" or p.poll() is None:
+        while (buffered_output := p.stdout.readline()) != "" or (
+            return_code := p.poll()
+        ) is None:
             print(buffered_output, end="", flush=True)
+
+        if return_code != 0:
+            raise sp.CalledProcessError(return_code, cmd, buffered_output)
 
 
 ##########################################
@@ -111,7 +117,7 @@ def download_abnativ_models(force: bool = False) -> None:
 ##########################################
 @app.function(
     gpu=GPU,
-    cpu=(0.125, 16.125),  # burst for tar compression
+    cpu=(1.125, 16.125),  # burst for tar compression
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     image=runtime_image,
     timeout=TIMEOUT,
@@ -133,7 +139,7 @@ def collect_abnativ_scores_single(
     input_hash = sha256(fasta_bytes).hexdigest()
 
     work_path = Path(OUTPUTS_DIR) / input_hash / output_id
-    if work_path.exists():
+    if work_path.exists() and any(work_path.iterdir()):
         print(f"Output directory already exists, skipping run: {work_path}")
         print("Packaging AbNatiV results...")
         tarball_bytes = package_outputs(str(work_path))
@@ -141,7 +147,7 @@ def collect_abnativ_scores_single(
         return tarball_bytes
 
     work_path.mkdir(parents=True, exist_ok=True)
-    input_fasta = work_path / f"{output_id}_input.fasta"
+    input_fasta = work_path.parent / f"{output_id}.fasta"
     with open(input_fasta, "wb") as f:
         f.write(fasta_bytes)
     cmd = [
@@ -163,9 +169,9 @@ def collect_abnativ_scores_single(
     if align_before_scoring:
         cmd.append("--do_align")
     if is_vhh:
-        cmd.append("--is_vhh")
+        cmd.append("--is_VHH")
     if plot_profiles:
-        cmd.append("--plot")
+        cmd.append("-plot")
 
     OUTPUTS_VOLUME.reload()
     run_command(cmd)
@@ -204,7 +210,7 @@ def submit_abnativ_task(
         out_dir: Local directory where the results are persisted; defaults to the current working directory.
         download_models: If True, download the AbNatiV models before inference.
         force_redownload: Force re-download of the models even if they already exist.
-        nativeness_type: Selects the AbNatiV trained model (VH, VKappa, VLambda, VHH).
+        nativeness_type: Selects the AbNatiV trained model (VH, VKappa, VLambda, VHH), or AbNatiV2 models (VH2, VL2, VHH2).
         mean_score_only: When True, only export a per-sequence score file instead of both sequence and per-position nativeness profiles.
         align_before_scoring: Align and clean the sequences before scoring; can be slow for large sets.
         num_workers: Number of workers to parallelize the alignment process.
@@ -227,7 +233,7 @@ def submit_abnativ_task(
 
     if out_dir is None:
         out_dir = Path.cwd()
-    local_out_dir = Path(out_dir) / run_name
+    local_out_dir = Path(out_dir)
     local_out_dir.mkdir(parents=True, exist_ok=True)
     out_zst_file = local_out_dir / f"{run_name}_abnativ_scores.tar.zst"
     if out_zst_file.exists():
