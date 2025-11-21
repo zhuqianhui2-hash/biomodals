@@ -2,6 +2,14 @@
 
 https://gitlab.developers.cam.ac.uk/ch/sormanni/abnativ
 
+Example:
+modal run biomodals/app/score/abnativ_app.py \
+    --input-vh-seq QVQLVQSGVEVKKPGASVKVSCKASGYTFTNYYMYWVRQAPGQGLEWMGGINPSNGGTNFNEKFKNRVTLTTDSSTTTAYMELKSLQFDDTAVYYCARRDYRFDMGFDYWGQGTTVTVSS \
+    --input-vl-seq EIVLTQSPATLSLSPGERATLSCRASKGVSTSGYSYLHWYQQKPGQAPRLLIYLASYLESGVPARFSGSGSGTDFTLTISSLEPEDFAVYYCQHSRDLPLTFGGGTKVEIKTSENLYFQ \
+    --run-name pembro \
+    --model-type paired \
+    --plot-profiles \
+    --align-before-scoring
 """
 # Ignore ruff warnings about import location and unsafe subprocess usage
 # ruff: noqa: PLC0415, S603
@@ -78,13 +86,11 @@ def run_command(cmd: list[str], **kwargs) -> None:
     kwargs.setdefault("encoding", "utf-8")
 
     with sp.Popen(cmd, **kwargs) as p:
-        while (buffered_output := p.stdout.readline()) != "" or (
-            return_code := p.poll()
-        ) is None:
+        while (buffered_output := p.stdout.readline()) != "" or p.poll() is None:
             print(buffered_output, end="", flush=True)
 
-        if return_code != 0:
-            raise sp.CalledProcessError(return_code, cmd, buffered_output)
+        if p.returncode != 0:
+            raise sp.CalledProcessError(p.returncode, cmd, buffered_output)
 
 
 ##########################################
@@ -133,7 +139,7 @@ def abnativ_score_unpaired(
     from tempfile import TemporaryDirectory
 
     with TemporaryDirectory() as tmpdir:
-        work_path = Path(tmpdir) / output_id
+        work_path = Path(tmpdir) / f"{output_id}_abnativ_{nativeness_type}"
         work_path.mkdir()
         input_fasta = work_path.parent / f"{output_id}.fasta"
         with open(input_fasta, "wb") as f:
@@ -149,8 +155,8 @@ def abnativ_score_unpaired(
             str(work_path),
             "--output_id",
             output_id,
-            "--ncpu",
-            str(ncpu),
+            # "--ncpu",
+            # str(ncpu),  # bug in upstream code
         ]
         if mean_score_only:
             cmd.append("--mean_score_only")
@@ -190,7 +196,7 @@ def abnativ_score_paired(
     from tempfile import TemporaryDirectory
 
     with TemporaryDirectory() as tmpdir:
-        work_path = Path(tmpdir) / output_id
+        work_path = Path(tmpdir) / f"{output_id}_abnativ_paired"
         work_path.mkdir()
         input_csv = work_path.parent / f"{output_id}.csv"
         with open(input_csv, "wb") as f:
