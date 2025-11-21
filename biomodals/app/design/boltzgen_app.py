@@ -13,7 +13,7 @@ from modal import App, Image, Volume
 ##########################################
 # https://modal.com/docs/guide/gpu
 GPU = os.environ.get("GPU", "L40S")
-TIMEOUT = int(os.environ.get("TIMEOUT", "1200"))  # for inputs and startup in seconds
+TIMEOUT = int(os.environ.get("TIMEOUT", "1800"))  # for inputs and startup in seconds
 APP_NAME = os.environ.get("MODAL_APP", "BoltzGen")
 
 # Volume for model cache
@@ -23,12 +23,14 @@ BOLTZGEN_MODEL_DIR = "/boltzgen-models"
 
 # Volume for outputs
 OUTPUTS_VOLUME_NAME = "boltzgen-outputs"
-OUTPUTS_VOLUME = Volume.from_name(OUTPUTS_VOLUME_NAME, create_if_missing=True)
+OUTPUTS_VOLUME = Volume.from_name(
+    OUTPUTS_VOLUME_NAME, create_if_missing=True, version=2
+)
 OUTPUTS_DIR = "/boltzgen-outputs"
 
 # Repositories and commit hashes
 BOLTZGEN_REPO = "https://github.com/HannesStark/boltzgen"
-BOLTZGEN_COMMIT = "f490b204e70360354b6afcda6a2edec8d7895383"
+BOLTZGEN_COMMIT = "8deda18e6f29f1505e00a9cdc2e0847c2be52ffa"
 BOLTZGEN_REPO_DIR = "/opt/boltzgen"
 
 ##########################################
@@ -84,6 +86,7 @@ def package_outputs(
         tar_args: Additional arguments to pass to `tar`.
         num_threads: Number of threads to use for compression.
     """
+    import os
     import subprocess as sp
     from pathlib import Path
 
@@ -103,8 +106,29 @@ def package_outputs(
             print(f"Warning: path {out_path} does not exist and will be skipped.")
 
     return sp.check_output(
-        cmd, cwd=root_path.parent, env={"ZSTD_NBTHREADS": str(num_threads)}
+        cmd, cwd=root_path.parent, env=os.environ | {"ZSTD_NBTHREADS": str(num_threads)}
     )  # noqa: S603
+
+
+def run_command(cmd: list[str], **kwargs) -> None:
+    """Run a shell command and stream output to stdout."""
+    import subprocess as sp
+
+    print(f"Running command: {' '.join(cmd)}")
+    # Set default kwargs for sp.Popen
+    kwargs.setdefault("stdout", sp.PIPE)
+    kwargs.setdefault("stderr", sp.STDOUT)
+    kwargs.setdefault("bufsize", 1)
+    kwargs.setdefault("encoding", "utf-8")
+
+    with sp.Popen(cmd, **kwargs) as p:
+        while (buffered_output := p.stdout.readline()) != "" or (
+            return_code := p.poll()
+        ) is None:
+            print(buffered_output, end="", flush=True)
+
+        if return_code != 0:
+            raise sp.CalledProcessError(return_code, cmd, buffered_output)
 
 
 class YAMLReferenceLoader:
@@ -205,19 +229,15 @@ class YAMLReferenceLoader:
 )
 def boltzgen_download(force: bool = False) -> None:
     """Download BoltzGen models into the mounted volume."""
-    import subprocess as sp
-
     # Download all artifacts (~/.cache overridden to volume mount)
     print("Downloading boltzgen models...")
     cmd = ["boltzgen", "download", "all", "--cache", BOLTZGEN_MODEL_DIR]
     if force:
         cmd.append("--force_download")
-    sp.Popen(
-        cmd, stdout=sp.PIPE, stderr=sp.STDOUT, encoding="utf-8", cwd=BOLTZGEN_REPO_DIR
-    )
-    print("Model download complete")
+    run_command(cmd, cwd=BOLTZGEN_REPO_DIR)
 
     BOLTZGEN_VOLUME.commit()
+    print("Model download complete")
 
 
 ##########################################
@@ -245,9 +265,12 @@ def prepare_boltzgen_run(
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_bytes(content)
 
+    OUTPUTS_VOLUME.commit()
+
 
 @app.function(
     cpu=(0.125, 16.125),  # burst for tar compression
+    memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=86400,
     volumes={OUTPUTS_DIR: OUTPUTS_VOLUME},
     image=runtime_image,
@@ -278,13 +301,21 @@ def collect_boltzgen_data(
         print(f"BoltzGen run completed: {boltzgen_dir}")
 
     OUTPUTS_VOLUME.reload()
-    return package_outputs(outdir, run_ids)
+    print("Packaging BoltzGen outputs...")
+    tarball_bytes = package_outputs(outdir, run_ids)
+    print("Packaging complete.")
+    return tarball_bytes
 
 
 @app.function(
     gpu=GPU,
+    cpu=1.125,
+    memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=86400,
-    volumes={OUTPUTS_DIR: OUTPUTS_VOLUME, BOLTZGEN_MODEL_DIR: BOLTZGEN_VOLUME},
+    volumes={
+        OUTPUTS_DIR: OUTPUTS_VOLUME,
+        BOLTZGEN_MODEL_DIR: BOLTZGEN_VOLUME.read_only(),
+    },
     image=runtime_image,
 )
 def boltzgen_run(
@@ -340,6 +371,7 @@ def boltzgen_run(
     with (
         sp.Popen(
             cmd,
+            bufsize=8,
             stdout=sp.PIPE,
             stderr=sp.STDOUT,
             encoding="utf-8",
@@ -400,6 +432,7 @@ def submit_boltzgen_task(
 
     if download_models:
         boltzgen_download.remote(force=force_redownload)
+        return
 
     # Find any file references in the yaml (path: something.cif)
     # File paths in yaml are relative to the yaml file location
