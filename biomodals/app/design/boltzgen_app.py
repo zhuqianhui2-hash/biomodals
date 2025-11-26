@@ -262,6 +262,8 @@ def prepare_boltzgen_run(
     conf_path = workdir / "inputs" / "config"
     conf_path.mkdir(parents=True, exist_ok=True)
     (conf_path / "design-specs.yaml").write_bytes(yaml_content)
+    # TODO: update yaml file name bc boltzgen uses it for naming outputs
+    # (conf_path / f"{run_name}.yaml").write_bytes(yaml_content)
 
     # Write any additional files (e.g., .cif files referenced in yaml)
     for rel_path, content in additional_files.items():
@@ -273,7 +275,6 @@ def prepare_boltzgen_run(
 
 
 @app.function(
-    cpu=(0.125, 16.125),  # burst for tar compression
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=86400,
     volumes={OUTPUTS_DIR: OUTPUTS_VOLUME},
@@ -286,21 +287,43 @@ def collect_boltzgen_data(
     num_designs: int = 10,
     steps: str | None = None,
     extra_args: str | None = None,
+    salvage_mode: bool = False,
 ) -> bytes:
     """Collect BoltzGen output data from multiple runs."""
+    from datetime import UTC, datetime
     from uuid import uuid4
 
     outdir = Path(OUTPUTS_DIR) / run_name / "outputs"
-    run_ids = [uuid4().hex for _ in range(num_parallel_runs)]
+    if salvage_mode:
+        run_dirs = [
+            d
+            for d in outdir.iterdir()
+            if not (
+                (d_final_dir := (d / "final_ranked_designs")).exists()
+                and (d_final_dir / "results_overview.pdf").exists()
+            )
+        ]
+        run_ids = [d.name for d in run_dirs]
+    else:
+        run_ids = [uuid4().hex for _ in range(num_parallel_runs)]
+        today: str = datetime.now(UTC).strftime("%Y%m%d")
+        run_dirs = [outdir / f"{today}-{run_id}" for run_id in run_ids]
 
-    run_dirs = [outdir / run_id for run_id in run_ids]
     kwargs = {
         "input_yaml_path": outdir.parent / "inputs" / "config" / "design-specs.yaml",
+        # "input_yaml_path": outdir.parent / "inputs" / "config" / f"{run_name}.yaml",
         "protocol": protocol,
         "num_designs": num_designs,
         "steps": steps,
         "extra_args": extra_args,
     }
+    cli_args_json_path = outdir.parent / "inputs" / "config" / "cli-args.json"
+    if not cli_args_json_path.exists():
+        import json
+
+        # Save a copy of the CLI args for reference
+        with cli_args_json_path.open("w") as f:
+            json.dump(kwargs, f, indent=2)
     for boltzgen_dir in boltzgen_run.map(run_dirs, kwargs=kwargs):
         print(f"BoltzGen run completed: {boltzgen_dir}")
 
@@ -414,6 +437,7 @@ def boltzgen_run(
 def submit_boltzgen_task(
     input_yaml: str,
     out_dir: str | None = None,
+    run_name: str | None = None,
     num_parallel_runs: int = 1,
     download_models: bool = False,
     force_redownload: bool = False,
@@ -421,12 +445,15 @@ def submit_boltzgen_task(
     num_designs: int = 10,
     steps: str | None = None,
     extra_args: str | None = None,
+    salvage_mode: bool = False,
 ) -> None:
-    """Run BoltzGen locally with results saved to out_dir.
+    """Run BoltzGen with results saved as a tarball to `out_dir`.
 
     Args:
         input_yaml: Path to YAML design specification file
         out_dir: Local output directory; defaults to $PWD
+        run_name: Name for this BoltzGen run; defaults to yaml file stem. Can be used
+            together with `salvage_mode` to continue previous runs.
         num_parallel_runs: Number of parallel runs to submit
         download_models: Whether to download model weights before running
         force_redownload: Whether to force re-download of model weights
@@ -435,34 +462,39 @@ def submit_boltzgen_task(
         num_designs: Number of designs to generate
         steps: Specific pipeline steps to run (e.g. "design inverse_folding")
         extra_args: Additional CLI arguments as string
+        salvage_mode: Whether to only try to finish incomplete runs
     """
-    from datetime import UTC, datetime
     from pathlib import Path
 
     if download_models:
         boltzgen_download.remote(force=force_redownload)
         return
 
-    # Find any file references in the yaml (path: something.cif)
-    # File paths in yaml are relative to the yaml file location
-    print("Checking if input yaml references additional files...")
+    # NOTE: make sure names are unique for different inputs
     yaml_path = Path(input_yaml)
-    yml_parser = YAMLReferenceLoader(yaml_path)
-    if yml_parser.additional_files:
-        print(
-            f"Including additional referenced files: {list(yml_parser.additional_files.keys())}"
+    if run_name is None:
+        run_name = yaml_path.stem
+
+    # Prepare BoltzGen run inputs if we're not re-running incomplete jobs
+    if not salvage_mode:
+        # Find any file references in the yaml (path: something.cif)
+        # File paths in yaml are relative to the yaml file location
+        print("Checking if input yaml references additional files...")
+
+        yml_parser = YAMLReferenceLoader(yaml_path)
+        if yml_parser.additional_files:
+            print(
+                f"Including additional referenced files: {list(yml_parser.additional_files.keys())}"
+            )
+
+        print(f"Submitting BoltzGen run for yaml: {input_yaml}")
+        yaml_str = yaml_path.read_bytes()
+
+        prepare_boltzgen_run.remote(
+            yaml_content=yaml_str,
+            run_name=run_name,
+            additional_files=yml_parser.additional_files,
         )
-
-    print(f"Submitting BoltzGen run for yaml: {input_yaml}")
-    yaml_str = yaml_path.read_bytes()
-    today: str = datetime.now(UTC).strftime("%Y%m%d")
-    run_name = f"{today}-{yaml_path.stem}"
-
-    prepare_boltzgen_run.remote(
-        yaml_content=yaml_str,
-        run_name=run_name,
-        additional_files=yml_parser.additional_files,
-    )
 
     print("Running BoltzGen...")
     outputs = collect_boltzgen_data.remote(
@@ -472,6 +504,7 @@ def submit_boltzgen_task(
         num_designs=num_designs,
         steps=steps,
         extra_args=extra_args,
+        salvage_mode=salvage_mode,
     )
     if out_dir is None:
         out_dir = Path.cwd()
