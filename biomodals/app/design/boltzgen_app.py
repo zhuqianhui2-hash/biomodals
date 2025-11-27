@@ -70,7 +70,7 @@ app = App(APP_NAME, image=runtime_image)
 # Helper functions
 ##########################################
 @app.function(
-    cpu=16.125,  # burst for tar compression
+    cpu=(1.125, 16.125),  # burst for tar compression
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=86400,
     volumes={OUTPUTS_DIR: OUTPUTS_VOLUME},
@@ -308,9 +308,9 @@ def collect_boltzgen_data(
         ]
         run_ids = [d.name for d in all_run_dirs]
     else:
-        run_ids = [uuid4().hex for _ in range(num_parallel_runs)]
         today: str = datetime.now(UTC).strftime("%Y%m%d")
-        run_dirs = [outdir / f"{today}-{run_id}" for run_id in run_ids]
+        run_dirs = [outdir / f"{today}-{uuid4().hex}" for _ in range(num_parallel_runs)]
+        run_ids = [d.name for d in run_dirs]
 
     kwargs = {
         "input_yaml_path": str(
