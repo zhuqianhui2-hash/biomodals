@@ -263,9 +263,7 @@ def prepare_boltzgen_run(
     # Write yaml to file
     conf_path = workdir / "inputs" / "config"
     conf_path.mkdir(parents=True, exist_ok=True)
-    (conf_path / "design-specs.yaml").write_bytes(yaml_content)
-    # TODO: update yaml file name bc boltzgen uses it for naming outputs
-    # (conf_path / f"{run_name}.yaml").write_bytes(yaml_content)
+    (conf_path / f"{run_name}.yaml").write_bytes(yaml_content)
 
     # Write any additional files (e.g., .cif files referenced in yaml)
     for rel_path, content in additional_files.items():
@@ -314,9 +312,8 @@ def collect_boltzgen_data(
 
     kwargs = {
         "input_yaml_path": str(
-            outdir.parent / "inputs" / "config" / "design-specs.yaml"
+            outdir.parent / "inputs" / "config" / f"{run_name}.yaml"
         ),
-        # "input_yaml_path": outdir.parent / "inputs" / "config" / f"{run_name}.yaml",
         "protocol": protocol,
         "num_designs": num_designs,
         "steps": steps,
