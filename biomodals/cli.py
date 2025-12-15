@@ -6,6 +6,7 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.table import Table
 
 # ruff: noqa: S603
@@ -80,7 +81,6 @@ def show_app_help(
             )
             raise typer.Exit(code=1)
 
-    app_name = app_path.stem.replace("_app", "")
     module_path = (
         str(app_path.relative_to(APP_HOME))
         .replace("/", ".")
@@ -95,7 +95,11 @@ def show_app_help(
         console.print(
             f"[bold]Help for application '[green]{app_path}[/green]':[/bold]\n"
         )
-        console.print(module.__doc__ or "No documentation available.")
+        if docstring := module.__doc__:
+            rendered_doc = Markdown(docstring)
+            console.print(rendered_doc)
+        else:
+            console.print("No documentation available.")
     except ImportError as e:
         console.print(f"[bold red]Error:[/bold red] Failed to import '{module_path}'")
         raise typer.Exit(code=1) from e

@@ -1,19 +1,35 @@
-"""Run ABCFold on Modal GPU instances.
+"""ABCFold2 source repo: <https://github.com/y1zhou/ABCFold/tree/feat/schema>.
 
-Ephemeral usage example:
+## Configuration
 
-    ```bash
-    modal run app/fold/abcfold2_app.py --input-yaml path/to/example.yaml
-    ```
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input-yaml` | **Required** | Path to YAML design specification file. For a detailed description of the YAML schema, see https://github.com/y1zhou/ABCFold/blob/feat/schema/abcfold/schema.py. |
+| `--out-dir` | `$CWD` | Optional local output directory. If not specified, outputs will be saved in a Modal volume only. |
+| `--run-name` | stem name of `--input-yaml` | Optional run name used to name output directory. |
+| `--search-templates`/`--no-search-templates` | `--search-templates` | Whether to search for templates and add to input YAML. |
+| `--download-models`/`--no-download-models` | `--no-download-models` | Whether to download model weights and skip running. |
+| `--force-redownload` | `--no-force-redownload` | Whether to force re-download of model weights even if they exist. |
+| `--run-boltz`/`--no-run-boltz` | `--run-boltz` | Whether to run Boltz inference. |
+| `--run-chai`/`--no-run-chai` | `--run-chai` | Whether to run Chai inference. |
 
-Deployment usage example:
-    https://modal.com/docs/guide/managing-deployments
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `MODAL_APP` | `ABCFold2` | Name of the Modal app to use. |
+| `GPU` | `A10G` | Type of GPU to use. See https://modal.com/docs/guide/gpu for details. |
+| `TIMEOUT` | `1800` | Timeout for each Modal function in seconds. |
 
-    ```bash
-    modal deploy app/fold/abcfold2_app.py --name ABCFold2
-    ```
+## Additional notes on input flags
 
-    See `client/fold/abcfold2.py` for example client code to call the deployed app.
+* MSAs will *always* be searched automatically, since omitting MSAs for Boltz/Chai translates to worse performance in most cases.
+* Templates will be searched only if the `--search-templates` flag is passed. When multiple templates are found, only the top four will be used.
+* The `--run-boltz` and `--run-chai` flags control whether to run structure prediction with the respective model. Inputs for both models will always be prepared for convenience.
+
+## Outputs
+
+* Results will be saved to the specified `--out-dir` under a subdirectory named after the `--run-name`.
+* The output directory will contain a `run-config.json` file with the run parameters used.
+* Inference results will be saved as `<model-name>_models.tar.zst` files. Extract them and analyze results using `abcfold2 postprocess`.
 """
 # Ignore ruff warnings about import location and unsafe subprocess usage
 # ruff: noqa: PLC0415, S603

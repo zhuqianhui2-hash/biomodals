@@ -1,15 +1,47 @@
-"""Run AbNatiV on Modal GPU instances.
+r"""AbNatiV source repo: <https://gitlab.developers.cam.ac.uk/ch/sormanni/abnativ>.
 
-https://gitlab.developers.cam.ac.uk/ch/sormanni/abnativ
+## Configuration
 
-Example:
-modal run biomodals/app/score/abnativ_app.py \
-    --input-vh-seq QVQLVQSGVEVKKPGASVKVSCKASGYTFTNYYMYWVRQAPGQGLEWMGGINPSNGGTNFNEKFKNRVTLTTDSSTTTAYMELKSLQFDDTAVYYCARRDYRFDMGFDYWGQGTTVTVSS \
-    --input-vl-seq EIVLTQSPATLSLSPGERATLSCRASKGVSTSGYSYLHWYQQKPGQAPRLLIYLASYLESGVPARFSGSGSGTDFTLTISSLEPEDFAVYYCQHSRDLPLTFGGGTKVEIKTSENLYFQ \
-    --run-name pembro \
-    --model-type paired \
-    --plot-profiles \
-    --align-before-scoring
+**General flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--run-name` | **Required** | Prefix used to name the output directory and files. |
+| `--out-dir` | `$CWD` | Optional local output directory. If not specified, outputs will be saved to the current working directory. |
+| `--model-type` | `VH` | Selects the AbNatiV trained model (VH, VKappa, VLambda, VHH), or AbNatiV2 models (VH2, VL2, VHH2). If set to "paired", the paired V2 model will be used. |
+| `--download-models`/`--no-download-models` | `--no-download-models` | Whether to download model weights and skip running. |
+| `--force-redownload` | `--no-force-redownload` | Whether to force re-download of model weights even if they exist. |
+| `--mean-score-only`/`--no-mean-score-only` | `--no-mean-score-only` | When True, only export a per-sequence score file instead of both sequence and per-position nativeness profiles. |
+| `--align-before-scoring`/`--no-align-before-scoring` | `--align-before-scoring` | Align and clean the sequences before scoring. |
+| `--num-workers` | `1` | Number of workers to parallelize the alignment process. |
+| `--plot-profiles`/`--no-plot-profiles` | `--plot-profiles` | Generate and save per-sequence profile plots under `{output_directory}/{output_id}_profiles`. |
+
+**Single-sequence model flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input-fasta-or-seq` | `None` | Path to a FASTA file or a single-sequence string. Required for single-chain models. |
+| `--is-vhh`/`--no-is-vhh` | `--no-is-vhh` | Use the VHH alignment seed, which is better for nanobody sequences. |
+
+**Paired-sequence model flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input-paired-csv` | `None` | Path to a CSV file containing paired VH and VL sequences. The CSV file should have columns "ID", "vh_seq", and "vl_seq". Required for paired model unless the following args are both provided. |
+| `--input-vh-seq` | `None` | A single-sequence string for VH sequences. Used if `--input-paired-csv` is not provided. |
+| `--input-vl-seq` | `None` | A single-sequence string for VL sequences. Used if `--input-paired-csv` is not provided. |
+
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `MODAL_APP` | `AbNatiV` | Name of the Modal app to use. |
+| `GPU` | `A10G` | Type of GPU to use. See https://modal.com/docs/guide/gpu for details. |
+| `TIMEOUT` | `1800` | Timeout for each Modal function in seconds. |
+
+## Notes
+
+* Always check the `--model-type` argument to ensure you are using the correct model for your sequences.
+* When `--model-type` is set to `paired`, the `--input-fasta-or-seq` argument is ignored, and sequences are read from either `--input-paired-csv` or the combination of `--input-vh-seq` and `--input-vl-seq`.
+* In paired mode, `--input-paired-csv` takes precedence over `--input-vh-seq` and `--input-vl-seq` if both are provided.
 """
 # Ignore ruff warnings about import location and unsafe subprocess usage
 # ruff: noqa: PLC0415, S603

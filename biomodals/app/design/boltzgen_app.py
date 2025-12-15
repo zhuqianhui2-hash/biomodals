@@ -1,4 +1,34 @@
-"""BoltzGen for VHH generation."""
+"""BoltzGen source repo: <https://github.com/HannesStark/boltzgen>.
+
+## Configuration
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--input-yaml` | **Required** | Path to YAML design specification file. |
+| `--out-dir` | `$CWD` | Optional local output directory. If not specified, outputs will be saved in a Modal volume only. |
+| `--run-name` | stem name of `--input-yaml` | Optional run name used to name output directory. |
+| `--num-parallel-runs` | `1` | Number of parallel runs to submit. |
+| `--download-models`/`--no-download-models` | `--no-download-models` | Whether to download model weights and skip running. |
+| `--force-redownload` | `--no-force-redownload` | Whether to force re-download of model weights even if they exist. |
+| `--protocol` | `nanobody-anything` | Design protocol, one of: protein-anything, peptide-anything, protein-small_molecule, `antibody-anything`, or nanobody-anything. |
+| `--num-designs` | `10` | Number of designs to generate *per run*. |
+| `--steps` | `None` | Specific pipeline steps to run (e.g. "design,inverse_folding"). |
+| `--extra-args` | `None` | Additional CLI arguments as a single string. |
+| `--salvage-mode`/`--no-salvage-mode` | `--no-salvage-mode` | Whether to try to finish incomplete runs. |
+
+For a complete set of BoltzGen CLI options that can be passed via `--extra-args`, see <https://github.com/HannesStark/boltzgen#all-command-line-arguments>.
+
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `MODAL_APP` | `BoltzGen` | Name of the Modal app to use. |
+| `GPU` | `L40S` | Type of GPU to use. See https://modal.com/docs/guide/gpu for details. |
+| `TIMEOUT` | `1800` | Timeout for each Modal function in seconds. |
+
+## Outputs
+
+* Results will be saved to the specified `--out-dir` under a subdirectory named after the `--run-name`.
+* The `--run-name` and `--salvage-mode` flags can be used together to continue previous incomplete runs. When finished, all results under the same run name will be packaged and returned.
+"""
 # Ignore ruff warnings about import location and unsafe subprocess usage
 # ruff: noqa: PLC0415, S603
 
