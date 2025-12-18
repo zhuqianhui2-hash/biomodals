@@ -5,7 +5,7 @@
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--input-yaml` | **Required** | Path to YAML design specification file. For a detailed description of the YAML schema, see https://github.com/y1zhou/ABCFold/blob/feat/schema/abcfold/schema.py. |
-| `--out-dir` | `$CWD` | Optional local output directory. If not specified, outputs will be saved in a Modal volume only. |
+| `--out-dir` | `$CWD` | Optional local output directory. If not specified, outputs will be saved in the current working directory. |
 | `--run-name` | stem name of `--input-yaml` | Optional run name used to name output directory. |
 | `--search-templates`/`--no-search-templates` | `--search-templates` | Whether to search for templates and add to input YAML. |
 | `--download-models`/`--no-download-models` | `--no-download-models` | Whether to download model weights and skip running. |
@@ -548,9 +548,9 @@ def submit_abcfold2_task(
     if not search_templates:
         run_name = f"{run_name}-no-tmpl"
 
-    if out_dir is None:
-        out_dir = Path.cwd()
-    local_out_dir = Path(out_dir) / run_name
+    local_out_dir = (
+        Path(out_dir) / run_name if out_dir is not None else Path.cwd() / run_name
+    )
     if local_out_dir.exists():
         raise FileExistsError(f"Output directory already exists: {local_out_dir}")
 
