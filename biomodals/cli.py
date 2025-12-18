@@ -76,15 +76,12 @@ def show_app_help(
     ],
 ):
     """Show help for a specific biomodals application."""
-    app_file = Path(app_name)
-    if app_file.exists():
-        app_path = app_file
+    all_apps = get_all_apps(use_absolute_paths=True)
+    if app_name in all_apps:
+        app_path = all_apps[app_name]
     else:
-        app_path = None
-        for f in APP_HOME.glob(f"*/{app_name}_app.py"):
-            app_path = f
-            break
-        if app_path is None:
+        app_path = Path(app_name).expanduser()
+        if not app_path.exists():
             console.print(
                 f"[bold red]Error:[/bold red] Application '{app_name}' not found."
             )
@@ -156,7 +153,7 @@ def run_command(
     if app_name_or_path in all_apps:
         app_path = all_apps[app_name_or_path]
     else:
-        app_path = Path(app_name_or_path).resolve()
+        app_path = Path(app_name_or_path).expanduser()
         if not app_path.exists():
             console.print(
                 f"[bold red]Error:[/bold red] Application '{app_name_or_path}' not found."
