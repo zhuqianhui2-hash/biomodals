@@ -2,7 +2,7 @@
 
 import importlib
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -55,7 +55,9 @@ def app_path_to_module_path(app_path: Path) -> str:
     return f"biomodals.app.{module_path}"
 
 
-def _run_command(cmd: list[str], **kwargs) -> None:
+def _run_command(
+    cmd: list[str], console_kwargs: dict[str, Any] | None = None, **kwargs
+) -> None:
     """Run a shell command and stream output to stdout."""
     import os
     import subprocess as sp
@@ -74,7 +76,7 @@ def _run_command(cmd: list[str], **kwargs) -> None:
 
         buffered_output = None
         while (buffered_output := p.stdout.readline()) != "" or p.poll() is None:
-            console.print(buffered_output, end="")
+            console.print(buffered_output, end="", **console_kwargs or {})
 
         if p.returncode != 0:
             raise sp.CalledProcessError(p.returncode, cmd, buffered_output)
@@ -212,7 +214,7 @@ def run_command(
     cmd = ["modal", modal_mode, full_app]
 
     if flags:
-        _run_command([*cmd, *flags])
+        _run_command([*cmd, *flags], console_kwargs={"markup": False})
     elif entrypoint_name is not None:
         _run_command(["biomodals", "help", str(full_app)])
     else:
