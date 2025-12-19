@@ -297,11 +297,12 @@ def prepare_abcfold2(
     # Check if MSA and templates were already generated for a previous run with same ID
     yaml_path = out_dir_full / f"{run_id}.yaml"
 
-    if not yaml_path.exists():
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_yaml_path = Path(tmpdir) / f"{run_id}.yaml"
-            tmp_yaml_path.write_bytes(yaml_str)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_yaml_path = Path(tmpdir) / f"{run_id}.yaml"
+        tmp_yaml_path.write_bytes(yaml_str)
+        new_conf = load_params_from_run_yaml(tmp_yaml_path)
 
+        if not yaml_path.exists():
             # Run MSA and template search
             search_msa(
                 conf_file=tmp_yaml_path,
@@ -329,6 +330,7 @@ def prepare_abcfold2(
     conf = load_params_from_run_yaml(yaml_path)
     conf["run_id"] = run_id
     conf["workdir"] = str(out_dir_full)
+    conf["seeds"] = new_conf["seeds"]  # ensure seeds are up to date
     return conf
 
 
