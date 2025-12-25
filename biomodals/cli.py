@@ -215,9 +215,10 @@ def run_command(
     full_app = (
         str(app_path) if entrypoint_name is None else f"{app_path}::{entrypoint_name}"
     )
-    cmd = ["modal", modal_mode, full_app]
+    cmd = ["modal", modal_mode]
     if detach:
         cmd.append("-d")
+    cmd.append(str(full_app))
 
     if flags:
         _run_command([*cmd, *flags], console_kwargs={"markup": False})
