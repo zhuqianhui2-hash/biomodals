@@ -216,6 +216,15 @@ def run_command(cmd: list[str], **kwargs) -> None:
             raise sp.CalledProcessError(p.returncode, cmd, buffered_output)
 
 
+def file1_needs_update(file1: Path, file2: Path) -> bool:
+    """Return True if file1 doesn't exist or is older than file2."""
+    if not file1.exists():
+        return True
+    if not file2.exists():
+        raise FileNotFoundError(f"File not found for timestamp comparison: {file2}")
+    return file1.stat().st_mtime < file2.stat().st_mtime
+
+
 ##########################################
 # Inference functions
 ##########################################
@@ -370,6 +379,41 @@ def prepare_tpr_cpu(
 
 
 @app.function(
+    image=biotite_image,
+    cpu=1,
+    memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
+    timeout=TIMEOUT,
+    volumes={OUTPUTS_DIR: OUTPUTS_VOLUME},
+)
+def find_traj_last_step(traj_file: str, topology_file: str) -> int:
+    """Calculated simulated steps from the simulation time (in ps) in a trajectory."""
+    from pathlib import Path
+
+    import biotite.structure as struc
+    import biotite.structure.io as strucio
+    import biotite.structure.io.xtc as xtc
+    import numpy as np
+
+    input_pdb_path = Path(topology_file)
+    if not input_pdb_path.exists():
+        raise FileNotFoundError(f"Input PDB file not found: {input_pdb_path}")
+    traj_path = Path(traj_file)
+    if not traj_path.exists():
+        raise FileNotFoundError(f"Trajectory file not found: {traj_path}")
+
+    template = strucio.load_structure(input_pdb_path)
+    protein_mask = struc.filter_amino_acids(template)
+    template = template[protein_mask]
+
+    xtc_file = xtc.XTCFile.read(traj_path, atom_i=np.where(protein_mask)[0])
+    trajectory = xtc_file.get_structure(template)
+
+    # Get simulation time in ps
+    time = xtc_file.get_time()
+    return int(time[-1] / 0.002)  # dt=2 fs, which is 0.002 ps
+
+
+@app.function(
     gpu=GPU,
     cpu=N_GMX_THREADS + 0.125,
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
@@ -377,21 +421,34 @@ def prepare_tpr_cpu(
     volumes={OUTPUTS_DIR: OUTPUTS_VOLUME},
 )
 def production_run_gpu(
-    run_name: str, num_threads: int = N_GMX_THREADS, use_openmp_threads: bool = False
+    run_name: str,
+    simulation_time_ns: int,
+    num_threads: int = N_GMX_THREADS,
+    use_openmp_threads: bool = False,
 ) -> Path:
     """Production Gromacs run."""
     import shutil
     from pathlib import Path
 
     work_path = Path(OUTPUTS_DIR) / run_name
-    tpr_file_path = work_path / f"production_{run_name}.tpr"
+    deffnm = f"production_{run_name}"
+    tpr_file_path = work_path / f"{deffnm}.tpr"
     if not tpr_file_path.exists():
         raise FileNotFoundError(f"Production topology file not found: {tpr_file_path}")
 
-    # TODO: pick up exisiting trajectory and continue simulation
-    traj_file_path = work_path / f"production_{run_name}.xtc"
-    if traj_file_path.exists():
-        return work_path
+    # Pick up exisiting trajectory and continue simulation when checkpoint exists
+    traj_file_path = work_path / f"{deffnm}.xtc"
+    checkpoint_file_path = work_path / f"{deffnm}.cpt"
+    nsteps = -2  # default: find nsteps from the mdp file
+    if traj_file_path.exists() and checkpoint_file_path.exists():
+        simulated_steps = find_traj_last_step.remote(
+            str(traj_file_path), str(work_path / f"{run_name}.pdb")
+        )
+        total_steps = simulation_time_ns * 500000  # 2 fs timestep
+        nsteps = total_steps - simulated_steps
+        if nsteps <= 0:
+            print("✅ Production run already completed, skipping.")
+            return work_path
 
     gmx = shutil.which("gmx_mpi") if use_openmp_threads else shutil.which("gmx")
     if gmx is None:
@@ -401,7 +458,11 @@ def production_run_gpu(
         gmx,
         "mdrun",
         "-deffnm",
-        tpr_file_path.stem,
+        deffnm,
+        "-cpi",
+        checkpoint_file_path.name,
+        "-nsteps",
+        str(nsteps),
         "-gpu_id",
         "0",
         "-nb",
@@ -437,21 +498,36 @@ def production_run_gpu(
     volumes={OUTPUTS_DIR: OUTPUTS_VOLUME},
 )
 def production_run_cpu(
-    run_name: str, num_threads: int = N_GMX_THREADS, use_openmp_threads: bool = False
+    run_name: str,
+    simulation_time_ns: int,
+    num_threads: int = N_GMX_THREADS,
+    use_openmp_threads: bool = False,
 ) -> Path:
     """Production Gromacs run."""
     import shutil
     from pathlib import Path
 
     work_path = Path(OUTPUTS_DIR) / run_name
-    tpr_file_path = work_path / f"production_{run_name}.tpr"
+    deffnm = f"production_{run_name}"
+    tpr_file_path = work_path / f"{deffnm}.tpr"
     if not tpr_file_path.exists():
         raise FileNotFoundError(f"Production topology file not found: {tpr_file_path}")
 
-    # TODO: pick up exisiting trajectory and continue simulation
-    traj_file_path = work_path / f"production_{run_name}.xtc"
-    if traj_file_path.exists():
-        return work_path
+    # Pick up exisiting trajectory and continue simulation when checkpoint exists
+    traj_file_path = work_path / f"{deffnm}.xtc"
+    checkpoint_file_path = work_path / f"{deffnm}.cpt"
+    nsteps = -2  # default: find nsteps from the mdp file
+    if traj_file_path.exists() and checkpoint_file_path.exists():
+        simulated_steps = find_traj_last_step.remote(
+            str(traj_file_path), str(work_path / f"{run_name}.pdb")
+        )
+        total_steps = simulation_time_ns * 500000  # 2 fs timestep
+        nsteps = total_steps - simulated_steps
+        if nsteps <= 0:
+            print("✅ Production run already completed, skipping.")
+            return work_path
+
+        print(f"Continuing production run for additional {nsteps} steps...")
 
     gmx = shutil.which("gmx_mpi") if use_openmp_threads else shutil.which("gmx")
     if gmx is None:
@@ -461,7 +537,11 @@ def production_run_cpu(
         gmx,
         "mdrun",
         "-deffnm",
-        tpr_file_path.stem,
+        deffnm,
+        "-cpi",
+        checkpoint_file_path.name,
+        "-nsteps",
+        str(nsteps),
         "-nb",
         "cpu",
         "-pmefft",
@@ -553,6 +633,10 @@ def postprocess_traj(
 
     # Save the processed trajectory
     processed_traj_path = work_path / f"{traj_prefix}{run_name}_nopbc.xtc"
+    if file1_needs_update(processed_traj_path, traj_path):
+        processed_traj_path.unlink(
+            missing_ok=True
+        )  # remove outdated processed trajectory
     if not processed_traj_path.exists() and save_processed_traj:
         new_traj_file = xtc.XTCFile()
         new_traj_file.set_structure(trajectory, time=time * 1000.0)  # time in ps
@@ -561,6 +645,8 @@ def postprocess_traj(
 
     # Dump the last frame of the processed trajectory as PDB
     last_frame_path = work_path / f"{traj_prefix}{run_name}.pdb"
+    if file1_needs_update(last_frame_path, traj_path):
+        last_frame_path.unlink(missing_ok=True)  # remove outdated last frame
     if not last_frame_path.exists():
         strucio.save_structure(last_frame_path, trajectory[-1])
         OUTPUTS_VOLUME.commit()
@@ -568,6 +654,9 @@ def postprocess_traj(
     # RMSD vs. the initial frame
     rmsd_fig_path = work_path / f"rmsd_{traj_prefix}{run_name}.png"
     rmsd_csv_path = rmsd_fig_path.with_suffix(".csv")
+    if file1_needs_update(rmsd_csv_path, traj_path):
+        rmsd_csv_path.unlink(missing_ok=True)
+        rmsd_fig_path.unlink(missing_ok=True)
     if not rmsd_csv_path.exists():
         rmsd = struc.rmsd(trajectory[0], trajectory)
         np.savetxt(
@@ -595,6 +684,9 @@ def postprocess_traj(
     # Radius of gyration
     rg_fig_path = work_path / f"rg_{traj_prefix}{run_name}.png"
     rg_csv_path = rg_fig_path.with_suffix(".csv")
+    if file1_needs_update(rg_csv_path, traj_path):
+        rg_csv_path.unlink(missing_ok=True)
+        rg_fig_path.unlink(missing_ok=True)
     if not rg_csv_path.exists():
         rg = struc.gyration_radius(trajectory)
         np.savetxt(
@@ -621,6 +713,9 @@ def postprocess_traj(
     # RMSF of each residue
     rmsf_fig_path = work_path / f"rmsf_{traj_prefix}{run_name}.png"
     rmsf_csv_path = rmsf_fig_path.with_suffix(".csv")
+    if file1_needs_update(rmsf_csv_path, traj_path):
+        rmsf_csv_path.unlink(missing_ok=True)
+        rmsf_fig_path.unlink(missing_ok=True)
     if not rmsf_csv_path.exists():
         # Sidechain atoms fluctuate too much, so we only consider CA atoms
         ca_trajectory = trajectory[:, trajectory.atom_name == "CA"]
@@ -702,12 +797,14 @@ def submit_gromacs_task(
     if cpu_only:
         _ = production_run_cpu.remote(
             run_name=run_name,
+            simulation_time_ns=simulation_time_ns,
             num_threads=num_threads,
             use_openmp_threads=use_openmp_threads,
         )
     else:
         _ = production_run_gpu.remote(
             run_name=run_name,
+            simulation_time_ns=simulation_time_ns,
             num_threads=num_threads,
             use_openmp_threads=use_openmp_threads,
         )
