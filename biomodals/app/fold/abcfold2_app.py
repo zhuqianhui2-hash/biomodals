@@ -29,6 +29,7 @@
 ## Outputs
 
 * Results will be saved to the specified `--out-dir` under a subdirectory named after the `--run-name`.
+* When `--no-search-templates` is passed, `-no-tmpl` will be appended to the run name.
 * The output directory will contain a `run-config.json` file with the run parameters used.
 * Inference results will be saved as `<model-name>_models.tar.zst` files. Extract them and analyze results using `abcfold2 postprocess`.
 """
@@ -38,7 +39,7 @@
 import os
 from pathlib import Path
 
-from modal import App, Image, Volume
+from modal import App, FunctionCall, Image, Volume
 
 ##########################################
 # Modal configs
@@ -580,19 +581,30 @@ def submit_abcfold2_task(
         download_chai_models.remote(force=force_redownload)
 
     # Run Boltz for each seed
+    inference_tasks: list[FunctionCall] = []
+    output_paths: list[Path] = []
     if run_boltz:
         out_path = local_out_dir / "boltz_models.tar.zst"
         print(f"🧬 Running Boltz and collecting results to {out_path}")
-        boltz_data = collect_abcfold2_boltz_data.remote(run_conf=run_conf)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(boltz_data)
+        boltz_task = collect_abcfold2_boltz_data.spawn(run_conf=run_conf)
+        inference_tasks.append(boltz_task)
+        output_paths.append(out_path)
 
     # Run Chai for each seed
     if run_chai:
         out_path = local_out_dir / "chai_models.tar.zst"
         print(f"🧬 Running Chai and collecting results to {out_path}")
-        chai_data = collect_abcfold2_chai_data.remote(run_conf=run_conf)
+        chai_task = collect_abcfold2_chai_data.spawn(run_conf=run_conf)
+        inference_tasks.append(chai_task)
+        output_paths.append(out_path)
+
+    if not inference_tasks:
+        print("🧬 No inference tasks specified, exiting...")
+        return
+
+    inference_data = FunctionCall.gather(*inference_tasks)
+    for out_path, data in zip(output_paths, inference_data, strict=True):
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(chai_data)
+        out_path.write_bytes(data)
 
     print(f"🧬 ABCFold2 run complete! Results saved to {local_out_dir}")
