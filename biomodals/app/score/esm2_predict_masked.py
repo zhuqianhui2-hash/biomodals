@@ -21,10 +21,13 @@ from modal import App, Image
 GPU = os.environ.get("GPU", None)
 TIMEOUT = int(os.environ.get("TIMEOUT", 15))
 
+
 def download_model():
+    """Download the ESM2 model to cache it in the image."""
     import esm
 
     _model, _alphabet = esm.pretrained.esm2_t33_650M_UR50D()
+
 
 image = (
     Image.micromamba(python_version="3.10")
@@ -42,14 +45,15 @@ app = App("esm2_predict_masked", image=image)
 
 @app.function(timeout=TIMEOUT * 60, gpu=GPU)
 def esm2(fasta_name: str, fasta_str: str, make_figures: bool = False):
+    """Predict masked amino acids using ESM2 model."""
     from tempfile import TemporaryDirectory
-    import torch
+
     import esm
     import matplotlib.pyplot as plt
     import pandas as pd
+    import torch
 
     with TemporaryDirectory() as td_out:
-
         # Load ESM-2 model
         model, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
         batch_converter = alphabet.get_batch_converter()
@@ -71,9 +75,9 @@ def esm2(fasta_name: str, fasta_str: str, make_figures: bool = False):
 
         for i, (label, seq) in enumerate(data):
             # Find the position of the mask token for this sequence
-            mask_position = (batch_tokens[i] == alphabet.mask_idx).nonzero(as_tuple=True)[
-                0
-            ][0]
+            mask_position = (batch_tokens[i] == alphabet.mask_idx).nonzero(
+                as_tuple=True
+            )[0][0]
 
             # Get logits for the masked position
             logits = results["logits"][i, mask_position]
@@ -85,7 +89,7 @@ def esm2(fasta_name: str, fasta_str: str, make_figures: bool = False):
             top_probs, top_indices = probs.topk(5)
 
             all_probs, all_indices = probs.sort(descending=True)
-            for prob, idx in zip(all_probs, all_indices):
+            for prob, idx in zip(all_probs, all_indices, strict=True):
                 aa = alphabet.get_tok(idx)
                 results_list.append((i, label, aa, round(float(prob), 4)))
 
@@ -122,6 +126,7 @@ def main(
     out_dir: str = "./out/esm2_predict_masked",
     run_name: str | None = None,
 ):
+    """Run ESM2 masked amino acid prediction."""
     from datetime import datetime
 
     fasta_str = open(input_faa).read()
