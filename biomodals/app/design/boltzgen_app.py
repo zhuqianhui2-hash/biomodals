@@ -60,8 +60,8 @@ OUTPUTS_VOLUME = Volume.from_name(
 OUTPUTS_DIR = "/boltzgen-outputs"
 
 # Repositories and commit hashes
-BOLTZGEN_REPO = "https://github.com/HannesStark/boltzgen"
-BOLTZGEN_COMMIT = "a941e4eb3d4457ac6a9b636d7bfdd024df8063cf"
+BOLTZGEN_REPO = "https://github.com/y1zhou/boltzgen"
+BOLTZGEN_COMMIT = "fd502a7587ffa073846c7c9f6d5b487a10eaa79f"
 BOLTZGEN_REPO_DIR = "/opt/boltzgen"
 
 ##########################################
@@ -87,12 +87,12 @@ runtime_image = (
                 f"git checkout {BOLTZGEN_COMMIT}",
                 "uv venv --python 3.12",
                 "uv pip install .",
+                "uv pip install polars[pandas,numpy,calamine,xlsxwriter] tqdm",
             ),
         )
     )
     .env({"PATH": f"{BOLTZGEN_REPO_DIR}/.venv/bin:$PATH"})
-    .run_commands("uv pip install polars[pandas,numpy,calamine,xlsxwriter] tqdm")
-    .apt_install("fd-find")
+    .apt_install("fd-find")  # for warming up disk cache when downloading outputs
     .workdir(BOLTZGEN_REPO_DIR)
 )
 
