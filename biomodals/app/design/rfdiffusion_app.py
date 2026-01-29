@@ -48,12 +48,13 @@ runtime_image = (
         "tar",
         "fd-find",  # prefer fd over find
     )
-     .run_commands(
+    .run_commands(
         # CHANGED: ensure the 'fd' binary is available (Ubuntu often exposes it as 'fdfind').
         "bash -lc 'command -v fd >/dev/null 2>&1 || (command -v fdfind >/dev/null 2>&1 && ln -sf $(command -v fdfind) /usr/local/bin/fd) || true'"
     )
-     .run_commands(
-        f"git clone --depth 1 https://github.com/RosettaCommons/RFdiffusion.git {RFD_REPO_DIR}"
+    .run_commands(
+       f"git clone --depth 1 https://github.com/RosettaCommons/RFdiffusion.git {RFD_REPO_DIR}"
+    )
     .env(
         {
             "PYTHONPATH": RFD_REPO_DIR,
@@ -80,7 +81,7 @@ runtime_image = (
         "einops",
         "opt_einsum",
         "dm-tree",
-        "pyrsistent",   # RFdiffusion symmetry 依赖    
+        "pyrsistent",   # RFdiffusion symmetry 
         "torchdata>=0.7",
     )
     .run_commands(
