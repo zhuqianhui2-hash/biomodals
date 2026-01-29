@@ -51,6 +51,10 @@ RFD_CHECKPOINT_URLS: dict[str, str] = {
 # -------------------------
 # Image definition
 # -------------------------
+# NOTE:
+# A newer, modern CUDA/PyTorch-style environment 
+# (https://github.com/JMB-Scripts/RFdiffusion-dockerfile-nvidia-RTX5090/blob/main/RTX-5090.dockerfile) 
+
 runtime_image = (
     Image.micromamba(python_version="3.10")
     .apt_install(
@@ -97,7 +101,8 @@ runtime_image = (
         "opt_einsum",
         "dm-tree",
         "pyrsistent",   # RFdiffusion symmetry 
-        "torchdata>=0.7",
+        "aiohttp",  # async checkpoint download
+        "torchdata>=0.7",  # DGL / datapipes support
     )
     .run_commands(
     # build/install NVIDIA SE3Transformer in one chained step.
