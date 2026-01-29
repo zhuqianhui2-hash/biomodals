@@ -48,6 +48,13 @@ runtime_image = (
         "tar",
         "fd-find",  # prefer fd over find
     )
+     .run_commands(
+        # CHANGED: ensure the 'fd' binary is available (Ubuntu often exposes it as 'fdfind').
+        "bash -lc 'command -v fd >/dev/null 2>&1 || (command -v fdfind >/dev/null 2>&1 && ln -sf $(command -v fdfind) /usr/local/bin/fd) || true'"
+    )
+     .run_commands(
+        f"git clone --depth 1 https://github.com/RosettaCommons/RFdiffusion.git {RFD_REPO_DIR}"
+       
     .env(
         {
             "UV_TORCH_BACKEND": "cu128",
@@ -55,8 +62,7 @@ runtime_image = (
             "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD": "1",  # 关键：切回 weights_only=False（当调用方未显式传参时）
         }
     )
-    .run_commands(
-        f"git clone --depth 1 https://github.com/RosettaCommons/RFdiffusion.git {RFD_REPO_DIR}"
+
     )
     .uv_pip_install(
         "torch",
