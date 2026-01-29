@@ -14,6 +14,7 @@ Typical usage:
 """
 
 import os
+import shlex
 from pathlib import Path
 
 from modal import App, Image, Volume
@@ -287,13 +288,16 @@ def rfdiffusion_infer(
     rfd_args: str,
 ) -> bytes:
     """
-    Run RFdiffusion inference inside the container.
+    Run RFdiffusion inference inside the container and return a .tar.zst bundle.
+
+    - Outputs are cached under /root/rfdiffusion_outputs/<run_name> on a persistent Volume.
+    - The returned archive contains the most useful artifacts (PDB/TRB/log/JSON/YAML by default).
     """
-    import shlex
     from tempfile import TemporaryDirectory
 
     env = build_runtime_env()  # ### CHANGED
-
+    rfd_debug = os.environ.get("RFD_DEBUG", "0") == "1"
+  
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
 
