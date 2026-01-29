@@ -162,7 +162,6 @@ def build_runtime_env() -> dict[str, str]:
 def package_dir_to_tar_zst(dir_path: str) -> bytes:
     """Package a directory into tar.zst and return bytes."""
     import subprocess as sp
-    from pathlib import Path
 
     dp = Path(dir_path)
     parent = str(dp.parent)
