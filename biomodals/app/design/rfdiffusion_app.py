@@ -45,7 +45,7 @@ runtime_image = (
         "ca-certificates",
         "zstd",
         "tar",
-        "findutils",  # for `find`
+        "fd-find",  # prefer fd over find
     )
     .env(
         {
