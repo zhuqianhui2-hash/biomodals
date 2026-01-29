@@ -1,5 +1,7 @@
 import sys
+import modal
 
+app = modal.App("example-hello-world")
 import modal
 
 app = modal.App("example-hello-world")
