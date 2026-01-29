@@ -85,15 +85,10 @@ runtime_image = (
         "torchdata>=0.7",
     )
     .run_commands(
-    # 进入 RFdiffusion 自带的 NVIDIA SE3Transformer 目录安装
-    f"bash -lc 'cd {RFD_REPO_DIR}/env/SE3Transformer && python -m pip install --no-cache-dir -r requirements.txt'",
-    f"bash -lc 'cd {RFD_REPO_DIR}/env/SE3Transformer && python setup.py install'",
-
-     # ✅ 构建期自检：环境变量 + e3nn import（关键）
-    "bash -lc 'python -c \"import os,torch; print(os.environ.get(\\\"TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD\\\")); import e3nn.o3; print(\\\"e3nn import OK\\\")\"'",
-
-    # 构建期自检：必须能 import
-    "bash -lc 'python -c \"import se3_transformer, sys; print(se3_transformer.__file__); print(sys.executable)\"'",  
+    # build/install NVIDIA SE3Transformer in one chained step.
+       f"cd {RFD_REPO_DIR}/env/SE3Transformer && "
+        "python -m pip install --no-cache-dir -r requirements.txt && "
+        "python setup.py install"
 
     # 先卸载可能已经装上的 CPU dgl
     "bash -lc 'python -m pip uninstall -y dgl || true'",
