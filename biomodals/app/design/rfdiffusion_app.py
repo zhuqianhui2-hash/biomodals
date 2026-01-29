@@ -270,11 +270,15 @@ async def download_rfdiffusion_models(force: bool = False) -> None:
 # -------------------------
 @app.function(
     gpu=GPU,
-    cpu=(2, 16),
+    cpu=(2, 4),
     memory=(4096, 65536),
     timeout=TIMEOUT,
     image=runtime_image,
-    volumes={RFD_MODELS_DIR: RFD_VOLUME.read_only()},
+    volumes={
+      RFD_MODELS_DIR: RFD_VOLUME.read_only(),
+      # output cache volume.
+      RFD_OUT_DIR: RFD_OUT_VOLUME,
+    },
 )
 def rfdiffusion_infer(
     input_pdb_bytes: bytes,
