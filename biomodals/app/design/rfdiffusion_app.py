@@ -125,6 +125,7 @@ runtime_image = (
         "python -m pip uninstall -y dgl || true && "
         'python -m pip install --no-cache-dir "dgl==1.1.3" -f https://data.dgl.ai/wheels/cu121/repo.html'
     )
+)
 
 
 app = App(APP_NAME, image=runtime_image)
@@ -294,7 +295,7 @@ def rfdiffusion_infer(
     input_pdb_bytes: bytes,
     input_pdb_name: str,
     run_name: str,
-    rfd_args: str,
+    hydra_overrides: str,
 ) -> bytes:
     """
     Run RFdiffusion inference inside the container and return a .tar.zst bundle.
@@ -322,14 +323,6 @@ def rfdiffusion_infer(
       
         # hydra overrides are passed as a single string, split safely.
         extra_tokens = shlex.split(hydra_overrides) if hydra_overrides else []
-
-        cmd = [
-            "python",
-            run_infer_py,
-            f"inference.input_pdb={input_pdb}",
-            f"inference.output_prefix={local_out_dir}/rfout",
-            *extra_tokens,
-        ]
 
         cmd = [
             "python",
@@ -444,4 +437,3 @@ def submit_rfdiffusion_task(
     )
     out_file.write_bytes(tar_bytes)
     print(f"Done. Saved: {out_file}")
-
