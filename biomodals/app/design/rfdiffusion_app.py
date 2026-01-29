@@ -4,7 +4,7 @@ RFdiffusion on Modal - minimal runnable scaffold (fixed).
 Typical usage:
 
   # 1) download models into the Modal Volume (run once)
-  modal run rfdiffusion_modal_fixed.py --download-models --force-redownload
+  modal run rfdiffusion_app.py --download-models --force-redownload
 
   # 2) run inference (binder design / scaffold etc.)
   modal run rfdiffusion_app.py \
