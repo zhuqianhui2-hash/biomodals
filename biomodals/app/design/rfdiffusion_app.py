@@ -169,6 +169,35 @@ def package_dir_to_tar_zst(dir_path: str) -> bytes:
     cmd = ["tar", "--zstd", "-cf", "-", name]
     return sp.check_output(cmd, cwd=parent)
 
+def collect_outputs_for_bundle(root_dir: str) -> list[Path]:
+    """
+    Collect the subset of output files that are typically useful to download.
+    This avoids bundling unnecessary large intermediate files.
+    """
+    import subprocess as sp
+    root = Path(root_dir)
+    # Prefer fd (multi-threaded); fallback to find.
+    has_fd = sp.run(["bash", "-lc", "command -v fd >/dev/null 2>&1"]).returncode == 0
+
+    if has_fd:
+        cmd = (
+            f"cd {root} && "
+            r"fd -t f '\.(pdb|trb|json|yaml|yml|log|txt|csv)$' ."
+        )
+    else:
+        cmd = (
+            f"cd {root} && "
+            r"find . -type f \( "
+            r"-name '*.pdb' -o -name '*.trb' -o -name '*.json' -o "
+            r"-name '*.yaml' -o -name '*.yml' -o -name '*.log' -o "
+            r"-name '*.txt' -o -name '*.csv' "
+            r"\)"
+        )
+
+    out = sp.check_output(["bash", "-lc", cmd], text=True).strip().splitlines()
+    files = [root / p.lstrip("./") for p in out if p.strip()]
+    return files
+
 
 # -------------------------
 # Step 1: download model weights into the Volume
