@@ -174,8 +174,7 @@ app = App(APP_NAME, image=runtime_image)
 
 from pathlib import Path
 import shutil
-import subprocess as sp
-import tempfile
+
 
 
 def run_command(cmd: list[str], cwd: str | Path | None = None, **kwargs) -> None:
@@ -215,7 +214,7 @@ def run_command(cmd: list[str], cwd: str | Path | None = None, **kwargs) -> None
 
 def _require_fd() -> None:
     """Fail fast if `fd` is not available (required in the runtime image)."""
-    import shutil
+    
 
     if shutil.which("fd") is None:
         raise RuntimeError(
@@ -380,7 +379,7 @@ def rfdiffusion_infer(
     - A SUCCESS marker file is written only after successful completion.
     """
     import shlex
-    from pathlib import Path
+    
     from tempfile import TemporaryDirectory
 
     with TemporaryDirectory() as tmpdir:
