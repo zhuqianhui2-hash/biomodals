@@ -440,6 +440,11 @@ def rfdiffusion_infer(
         # ---- run inference (writes directly into cache volume) ----
         run_command(cmd, cwd=RFD_REPO_DIR)
 
+        # NOTE:
+        # This SUCCESS marker is intentionally not consumed by the current code path.
+        # It serves as a lightweight completion flag for external inspection
+        # (e.g. humans, debugging, or future cache-reuse logic) to distinguish
+        # completed runs from partial or interrupted ones.
         # ---- mark success (only reached if inference didn't error) ----
         success_marker = cached_run_dir / "SUCCESS"
         success_marker.write_text("ok\n", encoding="utf-8")
