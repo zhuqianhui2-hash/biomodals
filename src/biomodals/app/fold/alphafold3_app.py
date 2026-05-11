@@ -219,6 +219,7 @@ def run_data_pipeline(json_bytes: bytes) -> Path:
     conf = _cache_conf_unpaired_msa(conf, cache_base_dir)
 
     # Check cache_dir for existing results and return early if found
+    # Note that the file could be from a different run with different seeds
     run_name = conf.name
     cache_data_file = cache_dir / run_name / f"{run_name}_data.json"
     if cache_data_file.exists():
@@ -290,7 +291,9 @@ def run_data_pipeline(json_bytes: bytes) -> Path:
         APP_INFO.msa_cache_dir: MSA_CACHE_VOLUME.read_only(),
     },
 )
-def run_inference_pipeline(json_path: Path, recycle: int, sample: int) -> bytes:
+def run_inference_pipeline(
+    json_path: Path, recycle: int, sample: int, model_seeds: list[int]
+) -> bytes:
     """Run AlphaFold3 structure prediction.
 
     Returns:
@@ -302,7 +305,9 @@ def run_inference_pipeline(json_path: Path, recycle: int, sample: int) -> bytes:
 
     from uniaf3.schema.alphafold3 import AF3Config
 
-    run_name = AF3Config.from_file(json_path).name
+    conf = AF3Config.from_file(json_path)
+    run_name = conf.name
+    conf.modelSeeds = model_seeds
     with TemporaryDirectory(prefix=f"alphafold3_inference_{run_name}_") as temp_dir:
         out_dir = Path(temp_dir) / run_name
         cmd = [
@@ -318,6 +323,7 @@ def run_inference_pipeline(json_path: Path, recycle: int, sample: int) -> bytes:
             f"--num_diffusion_samples={sample}",
         ]
         run_command_with_log(cmd, log_file=out_dir / f"{run_name}_inference.log")
+        print()
         return package_outputs(out_dir / run_name)
 
 
@@ -338,7 +344,7 @@ def submit_alphafold3_task(
     Args:
         input_json: Path to input JSON file.
         out_dir: Optional output directory (defaults to $CWD)
-        run_name: Optional run name (defaults to input filename stem)
+        run_name: Optional run name (defaults to `name` in the AF3 JSON config)
         search_msa: Whether to run MSA and template search data pipeline.
         recycle: Number of Pairformer recycles to use during inference.
         sample: Number of diffusion samples to generate per seed.
@@ -348,8 +354,9 @@ def submit_alphafold3_task(
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
+    conf = AF3Config.from_file(input_path)
     if run_name is None:
-        run_name = input_path.stem
+        run_name = conf.name
 
     local_out_dir = resolve_local_output_dir(out_dir)
     out_file = build_local_output_path(local_out_dir, run_name=run_name)
@@ -377,7 +384,7 @@ def submit_alphafold3_task(
 
     print(f"🧬 Running {CONF.name} inference pipeline...")
     tarball_bytes = run_inference_pipeline.remote(
-        json_path, recycle=recycle, sample=sample
+        json_path, recycle=recycle, sample=sample, model_seeds=conf.modelSeeds
     )
 
     # Save results locally
