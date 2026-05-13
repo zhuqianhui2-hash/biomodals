@@ -51,11 +51,7 @@ def parse_app_reference(app_name_or_path: str) -> AppReference:
     return AppReference(app=app_name, entrypoint=entrypoint_name if separator else None)
 
 
-def resolve_app_path(
-    app_name_or_path: str,
-    *,
-    app_home: Path = APP_HOME,
-) -> Path:
+def resolve_app_path(app_name_or_path: str, *, app_home: Path = APP_HOME) -> Path:
     """Resolve an app name or filesystem path to an app file path."""
     all_apps = get_all_apps(use_absolute_paths=True, app_home=app_home)
     if app_name_or_path in all_apps:
