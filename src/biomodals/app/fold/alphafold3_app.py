@@ -179,18 +179,6 @@ def _cache_conf_unpaired_msa(conf: AF3Config, msa_cache_dir: Path) -> AF3Config:
     return conf
 
 
-def _get_cache_key(conf: AF3Config, separator: str = ":") -> str:
-    """Get cache key for given protein and RNA sequences."""
-    protein_seqs: list[str] = []
-    rna_seqs: list[str] = []
-    for seq in conf.sequences:
-        if (prot_chain := seq.protein) is not None:
-            protein_seqs.append(prot_chain.sequence)
-        elif (rna_chain := seq.rna) is not None:
-            rna_seqs.append(rna_chain.sequence)
-    return hash_string(separator.join(protein_seqs + rna_seqs))
-
-
 ##########################################
 # Inference functions
 ##########################################
@@ -220,7 +208,9 @@ def run_data_pipeline(json_bytes: bytes) -> bytes:
     # Try to fill config with cached MSA
     conf = AF3Config.from_file(json_path)
     cache_base_dir = Path(APP_INFO.msa_cache_dir)
+    MSA_CACHE_VOLUME.reload()
     conf = _cache_conf_unpaired_msa(conf, cache_base_dir)
+    MSA_CACHE_VOLUME.commit()
 
     # Check if all protein/RNA sequences have MSA results
     run_name = conf.name
@@ -237,6 +227,7 @@ def run_data_pipeline(json_bytes: bytes) -> bytes:
         if (rna_seq := seq.rna) is not None
     )
     if all_protein_msa_filled and all_rna_msa_filled:
+        print(f"💊 MSA cache hit, returning {run_name} from cache")
         return input_json_path.read_bytes()
 
     # Copy volume db files to /tmp for faster access (~651.7GiB)
@@ -285,9 +276,10 @@ def run_data_pipeline(json_bytes: bytes) -> bytes:
     run_command_with_log(cmd, log_file=work_dir / f"{run_name}.log", verbose=True)
 
     # Cache unpaired MSA files in separate directories for future use
-    input_json_path = work_dir / f"{run_name}_data.json"
-    _ = _cache_conf_unpaired_msa(AF3Config.from_file(input_json_path), work_dir)
-    return input_json_path.read_bytes()
+    msa_json_path = work_dir / f"{run_name}_data.json"
+    _ = _cache_conf_unpaired_msa(AF3Config.from_file(msa_json_path), work_dir)
+    MSA_CACHE_VOLUME.commit()
+    return msa_json_path.read_bytes()
 
 
 @app.function(
@@ -301,7 +293,7 @@ def run_data_pipeline(json_bytes: bytes) -> bytes:
     },
 )
 def run_inference_pipeline(
-    json_path: Path, recycle: int, sample: int, model_seeds: list[int]
+    json_bytes: bytes, recycle: int, sample: int, model_seeds: list[int]
 ) -> bytes:
     """Run AlphaFold3 structure prediction.
 
@@ -312,29 +304,31 @@ def run_inference_pipeline(
     import sys
     from tempfile import TemporaryDirectory
 
-    from uniaf3.schema.alphafold3 import AF3Config
-
-    conf = AF3Config.from_file(json_path)
-    run_name = conf.name
-    conf.modelSeeds = model_seeds
-    with TemporaryDirectory(prefix=f"alphafold3_inference_{run_name}_") as temp_dir:
+    with TemporaryDirectory(prefix="alphafold3_inference_") as temp_dir:
         temp_path = Path(temp_dir)
+        input_json_path = temp_path / "input.json"
+        input_json_path.write_bytes(json_bytes)
+
+        conf = AF3Config.from_file(input_json_path)
+        run_name = conf.name
+        conf.modelSeeds = model_seeds
+
         out_dir = temp_path / run_name
-        conf.to_files(temp_path, run_name)
         cmd = [
             sys.executable,
             str(CONF.git_clone_dir / "run_alphafold.py"),
             "--run_inference=true",
             "--run_data_pipeline=false",
-            f"--json_path={temp_path / f'{run_name}.json'}",
+            f"--json_path={input_json_path}",
             f"--output_dir={out_dir}",
             f"--model_dir={CONF.model_dir}",
             f"--jax_compilation_cache_dir={CONF.model_dir / 'jax_cache'}",
             f"--num_recycles={recycle}",
             f"--num_diffusion_samples={sample}",
         ]
-        run_command_with_log(cmd, log_file=out_dir / f"{run_name}_inference.log")
-        print()
+        run_command_with_log(
+            cmd, log_file=out_dir / f"{run_name}_inference.log", verbose=True
+        )
         return package_outputs(out_dir / run_name)
 
 
@@ -365,8 +359,8 @@ def submit_alphafold3_task(
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
-    conf = AF3Config.from_file(input_path)
     if run_name is None:
+        conf = AF3Config.from_file(input_path)
         run_name = conf.name
 
     local_out_dir = resolve_local_output_dir(out_dir)
@@ -376,26 +370,11 @@ def submit_alphafold3_task(
     if search_msa:
         print(f"🧬 Running {CONF.name} data pipeline...")
         json_bytes = input_path.read_bytes()
-        json_path = run_data_pipeline.remote(json_bytes)
-    else:
-        # Upload the input JSON as-is when skipping the data pipeline
-        cache_key = _get_cache_key(AF3Config.from_file(input_path))
-        with CONF.get_out_volume().batch_upload() as batch:
-            batch.put_file(
-                input_path,
-                f"/{CONF.name}/{cache_key[:2]}/{cache_key}/{input_path.name}",
-            )
-        json_path = (
-            Path(APP_INFO.msa_cache_dir)
-            / CONF.name
-            / cache_key[:2]
-            / cache_key
-            / input_path.name
-        )
+        json_bytes = run_data_pipeline.remote(json_bytes)
 
     print(f"🧬 Running {CONF.name} inference pipeline...")
     tarball_bytes = run_inference_pipeline.remote(
-        json_path, recycle=recycle, sample=sample, model_seeds=conf.modelSeeds
+        json_bytes, recycle=recycle, sample=sample, model_seeds=conf.modelSeeds
     )
 
     # Save results locally
