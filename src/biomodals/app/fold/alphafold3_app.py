@@ -25,7 +25,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import modal
-from uniaf3.schema.alphafold3 import AF3RNA, AF3Config, AF3Protein
+import orjson
+from uniaf3.schema.alphafold3 import (
+    AF3RNA,
+    AF3Config,
+    AF3Protein,
+    AF3SequenceEntry,
+    AF3Template,
+)
 
 from biomodals.app.config import AppConfig
 from biomodals.app.constant import (
@@ -125,6 +132,16 @@ app = modal.App(CONF.name, image=runtime_image, tags=CONF.tags)
 ##########################################
 # Helper functions
 ##########################################
+def _load_conf_from_bytes(json_bytes: bytes) -> AF3Config:
+    """Load AlphaFold3 config from JSON bytes."""
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as temp_dir:
+        f = Path(temp_dir) / "config.json"
+        f.write_bytes(json_bytes)
+        return AF3Config.from_file(f)
+
+
 def _load_msa_cache(seq: AF3Protein | AF3RNA, msa_cache_dir: Path) -> Path:
     """Fetch MSA from cache if available."""
     seq_hash = hash_string(seq.sequence)
@@ -138,29 +155,52 @@ def _load_msa_cache(seq: AF3Protein | AF3RNA, msa_cache_dir: Path) -> Path:
 
         # When the config does not contain MSA, and cache file exists,
         # add the MSA from cache
-        # https://github.com/google-deepmind/alphafold3/blob/main/docs/input.md#multiple-sequence-alignment
+        if unpaired_msa_path.exists() and seq.unpairedMsa is None:
+            seq.unpairedMsa = unpaired_msa_path.read_text()
+
         paired_msa_path = seq_msa_cache_dir / "paired.a3m"
         if paired_msa_path.exists() and seq.pairedMsa is None:
             seq.pairedMsa = paired_msa_path.read_text()
 
-    # RNA does not have paired MSA, so check unpaired MSA for both protein and RNA
-    if seq.unpairedMsaPath is not None:
-        return seq_msa_cache_dir
-    if unpaired_msa_path.exists() and seq.unpairedMsa is None:
-        seq.unpairedMsa = unpaired_msa_path.read_text()
+        template_json_path = seq_msa_cache_dir / "templates.json"
+        if template_json_path.exists() and seq.templates is None:
+            templates = orjson.loads(template_json_path.read_bytes())
+            seq.templates = [AF3Template(**t) for t in templates]
+
+        # https://github.com/google-deepmind/alphafold3/blob/main/docs/input.md#multiple-sequence-alignment
+        # If only one of the MSA is set, remove them as a rerun is needed anyway
+        # We only check for None cases because it's ok to have unpaired MSA filled,
+        # and paired MSA being explicitly empty ("")
+        if not (seq.unpairedMsa is not None and seq.pairedMsa is not None):
+            seq.unpairedMsa = None
+            seq.pairedMsa = None
+    elif isinstance(seq, AF3RNA):
+        # RNA does not have paired MSA, so checking unpaired MSA is sufficient
+        if seq.unpairedMsaPath is not None:
+            return seq_msa_cache_dir
+        if unpaired_msa_path.exists() and seq.unpairedMsa is None:
+            seq.unpairedMsa = unpaired_msa_path.read_text()
+    else:
+        raise TypeError(f"Expected AF3Protein or AF3RNA, got {type(seq)}")
+
     return seq_msa_cache_dir
 
 
 def _save_msa_cache(seq: AF3Protein | AF3RNA, seq_msa_cache_dir: Path) -> None:
     """Save MSA results to cache files."""
+    seq_msa_cache_dir.mkdir(parents=True, exist_ok=True)
     unpaired_msa_path = seq_msa_cache_dir / "unpaired.a3m"
     if not unpaired_msa_path.exists() and seq.unpairedMsa is not None:
-        unpaired_msa_path.parent.mkdir(parents=True, exist_ok=True)
         unpaired_msa_path.write_text(seq.unpairedMsa)
-    if isinstance(seq, AF3Protein) and seq.pairedMsa is not None:
-        paired_msa_path = seq_msa_cache_dir / "paired.a3m"
-        paired_msa_path.parent.mkdir(parents=True, exist_ok=True)
-        paired_msa_path.write_text(seq.pairedMsa)
+    if isinstance(seq, AF3Protein):
+        if seq.pairedMsa is not None:
+            paired_msa_path = seq_msa_cache_dir / "paired.a3m"
+            paired_msa_path.write_text(seq.pairedMsa)
+        if (tmpl := seq.templates) is not None and tmpl:
+            import orjson
+
+            templates_path = seq_msa_cache_dir / "templates.json"
+            templates_path.write_bytes(orjson.dumps(tmpl))
 
 
 def _cache_conf_unpaired_msa(conf: AF3Config, msa_cache_dir: Path) -> AF3Config:
@@ -183,7 +223,7 @@ def _cache_conf_unpaired_msa(conf: AF3Config, msa_cache_dir: Path) -> AF3Config:
 # Inference functions
 ##########################################
 @app.function(
-    cpu=(8.125, 32.125),  # 8c per database searched with HMMER
+    cpu=(0.125, 32.125),  # 8c per database searched with HMMER
     memory=(1024, 131072),  # reserve 1GB, OOM at 128GB
     # Protein sequences: 304.8GiB
     # RNA sequences: 88.6GiB
@@ -196,26 +236,23 @@ def _cache_conf_unpaired_msa(conf: AF3Config, msa_cache_dir: Path) -> AF3Config:
         APP_INFO.msa_cache_dir: MSA_CACHE_VOLUME,
     },
 )
-def run_data_pipeline(json_bytes: bytes) -> bytes:
+def run_data_pipeline(json_bytes: bytes, copy_msa_to_ssd: bool = True) -> bytes:
     """Run AlphaFold3 data pipeline (CPU-only)."""
     import sys
     from tempfile import mkdtemp
 
-    temp_dir: Path = Path(mkdtemp(prefix="alphafold3_data_"))
-    json_path = temp_dir / "input.json"
-    json_path.write_bytes(json_bytes)
-
     # Try to fill config with cached MSA
-    conf = AF3Config.from_file(json_path)
-    cache_base_dir = Path(APP_INFO.msa_cache_dir)
+    msa_cache_dir = Path(APP_INFO.msa_cache_dir) / CONF.name
+    conf = _load_conf_from_bytes(json_bytes)
     MSA_CACHE_VOLUME.reload()
-    conf = _cache_conf_unpaired_msa(conf, cache_base_dir)
+    conf = _cache_conf_unpaired_msa(conf, msa_cache_dir)
     MSA_CACHE_VOLUME.commit()
 
     # Check if all protein/RNA sequences have MSA results
+    temp_dir: Path = Path(mkdtemp(prefix="alphafold3_data_"))
     run_name = conf.name
-    conf.to_files(cache_base_dir, run_name)
-    input_json_path = cache_base_dir / f"{run_name}.json"
+    input_json_path = temp_dir / f"{run_name}.json"
+    conf.to_files(temp_dir, run_name)
     all_protein_msa_filled = all(
         prot_seq.unpairedMsa is not None and prot_seq.pairedMsa is not None
         for seq in conf.sequences
@@ -227,39 +264,42 @@ def run_data_pipeline(json_bytes: bytes) -> bytes:
         if (rna_seq := seq.rna) is not None
     )
     if all_protein_msa_filled and all_rna_msa_filled:
-        print(f"💊 MSA cache hit, returning {run_name} from cache")
         return input_json_path.read_bytes()
 
-    # Copy volume db files to /tmp for faster access (~651.7GiB)
     # TODO: test sharded DB
-    db_dir = temp_dir / "db"
-    db_dir.mkdir()
-    msa_db_path = Path(APP_INFO.msa_db_dir)
-    db_files = [
-        # Protein sequence databases
-        "bfd-first_non_consensus_sequences.fasta",
-        "uniref90_2022_05.fa",
-        "uniprot_all_2021_04.fa",
-        "mgy_clusters_2022_05.fa",
-        "pdb_seqres_2022_09_28.fasta",
-        # RNA sequence databases
-        # "rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta",
-        # "rnacentral_active_seq_id_90_cov_80_linclust.fasta",
-        # "nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta",
-    ]
-
-    print(f"💊 Copying database files to local SSD {db_dir}")
-    # p = run_background_command(
-    #     f"tar -I zstd -xf {msa_db_path / 'pdb_2022_09_28_mmcif_files.tar.zst'} -C {db_dir}"
-    # )
-    copy_files({msa_db_path / db_file: db_dir / db_file for db_file in db_files})
-    # p.wait()
-    # if p.returncode != 0:
-    #     raise RuntimeError("Failed to extract mmCIF template files")
-
-    # TODO: more performant runs when multiple inputs share same chains
     # https://github.com/google-deepmind/alphafold3/blob/main/docs/performance.md
-    work_dir = cache_base_dir / run_name
+    # Copy volume db files to /tmp for faster access (~651.7GiB)
+    print("💊 MSA cache not hit, running data pipeline...")
+    msa_db_dir: list[str] = []
+    if copy_msa_to_ssd:
+        db_dir = temp_dir / "db"
+        db_dir.mkdir()
+        msa_db_path = Path(APP_INFO.msa_db_dir)
+        db_files = [
+            # Protein sequence databases
+            "bfd-first_non_consensus_sequences.fasta",
+            "uniref90_2022_05.fa",
+            "uniprot_all_2021_04.fa",
+            "mgy_clusters_2022_05.fa",
+            "pdb_seqres_2022_09_28.fasta",
+            # RNA sequence databases
+            # "rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta",
+            # "rnacentral_active_seq_id_90_cov_80_linclust.fasta",
+            # "nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta",
+        ]
+
+        print(f"💊 Copying database files to local SSD {db_dir}")
+        # p = run_background_command(
+        #     f"tar -I zstd -xf {msa_db_path / 'pdb_2022_09_28_mmcif_files.tar.zst'} -C {db_dir}"
+        # )
+        copy_files({msa_db_path / db_file: db_dir / db_file for db_file in db_files})
+        # p.wait()
+        # if p.returncode != 0:
+        #     raise RuntimeError("Failed to extract mmCIF template files")
+        msa_db_dir.append(str(db_dir))
+    msa_db_dir.append(str(msa_db_path))  # fallback for mmCIF templates and RNA
+
+    work_dir = temp_dir / run_name
     work_dir.mkdir(exist_ok=True)
     cmd = [
         sys.executable,
@@ -268,8 +308,7 @@ def run_data_pipeline(json_bytes: bytes) -> bytes:
         f"--json_path={input_json_path}",
         f"--output_dir={work_dir}",
         f"--model_dir={CONF.model_dir}",
-        f"--db_dir={db_dir}",
-        f"--db_dir={msa_db_path}",  # fallback for mmCIF templates and RNA
+        *(f"--db_dir={d}" for d in msa_db_dir),
         "--jackhmmer_n_cpu=8",
         "--nhmmer_n_cpu=8",
     ]
@@ -277,9 +316,56 @@ def run_data_pipeline(json_bytes: bytes) -> bytes:
 
     # Cache unpaired MSA files in separate directories for future use
     msa_json_path = work_dir / f"{run_name}_data.json"
-    _ = _cache_conf_unpaired_msa(AF3Config.from_file(msa_json_path), work_dir)
+    _ = _cache_conf_unpaired_msa(AF3Config.from_file(msa_json_path), msa_cache_dir)
     MSA_CACHE_VOLUME.commit()
     return msa_json_path.read_bytes()
+
+
+def search_msa_and_templates(
+    config_path: str | Path, search_chains_in_parallel: bool
+) -> bytes:
+    """Manage AlphaFold3 data pipeline(s)."""
+    conf = AF3Config.from_file(config_path)
+    msa_chains: list[tuple[int, AF3SequenceEntry]] = [
+        (i, chain)
+        for i, chain in enumerate(conf.sequences)
+        if chain.protein is not None or chain.rna is not None
+    ]
+
+    if not search_chains_in_parallel:
+        msa_json_bytes = run_data_pipeline.remote(
+            json_bytes=Path(config_path).read_bytes(),
+            copy_msa_to_ssd=len(msa_chains) > 1,
+        )
+        return msa_json_bytes
+
+    # Parallelize MSA search by chains
+    from tempfile import TemporaryDirectory
+
+    with TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        data_pipeline_futures = []
+        for i, msa_chain in msa_chains:
+            input_conf = conf.model_copy(deep=True)
+            input_conf.sequences = [msa_chain]
+            input_conf.to_files(tmp_path, str(i))
+            data_pipeline_futures.append(
+                run_data_pipeline.spawn(
+                    json_bytes=(tmp_path / f"{i}.json").read_bytes(),
+                    copy_msa_to_ssd=False,
+                )
+            )
+    msa_bytes = modal.FunctionCall.gather(*data_pipeline_futures)
+
+    # Merge into one AF3Config
+    for i, _ in msa_chains:
+        msa_conf = _load_conf_from_bytes(msa_bytes[i])
+        conf.sequences[i] = msa_conf.sequences[0]
+
+    with TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        conf.to_files(tmp_path, conf.name)
+        return (tmp_path / f"{conf.name}.json").read_bytes()
 
 
 @app.function(
@@ -341,6 +427,7 @@ def submit_alphafold3_task(
     out_dir: str | None = None,
     run_name: str | None = None,
     search_msa: bool = True,
+    search_chains_in_parallel: bool = True,
     recycle: int = 10,
     sample: int = 5,
 ) -> None:
@@ -351,6 +438,10 @@ def submit_alphafold3_task(
         out_dir: Optional output directory (defaults to $CWD)
         run_name: Optional run name (defaults to `name` in the AF3 JSON config)
         search_msa: Whether to run MSA and template search data pipeline.
+        search_chains_in_parallel: Whether to spawn multiple `data_pipeline`
+            jobs when there is more than one protein/RNA chain to query MSA.
+            If True, a 32-core job will be spawned for *each* chain. If False,
+            a single container will be used for all chains sequentially.
         recycle: Number of Pairformer recycles to use during inference.
         sample: Number of diffusion samples to generate per seed.
     """
@@ -359,8 +450,8 @@ def submit_alphafold3_task(
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
+    conf = AF3Config.from_file(input_path)
     if run_name is None:
-        conf = AF3Config.from_file(input_path)
         run_name = conf.name
 
     local_out_dir = resolve_local_output_dir(out_dir)
@@ -369,8 +460,9 @@ def submit_alphafold3_task(
     # Run inference
     if search_msa:
         print(f"🧬 Running {CONF.name} data pipeline...")
+        json_bytes = search_msa_and_templates(input_path, search_chains_in_parallel)
+    else:
         json_bytes = input_path.read_bytes()
-        json_bytes = run_data_pipeline.remote(json_bytes)
 
     print(f"🧬 Running {CONF.name} inference pipeline...")
     tarball_bytes = run_inference_pipeline.remote(
