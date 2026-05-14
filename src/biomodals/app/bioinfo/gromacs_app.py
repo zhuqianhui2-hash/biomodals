@@ -12,7 +12,7 @@
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import modal
 
@@ -57,7 +57,8 @@ OUTPUTS_VOLUME = CONF.get_out_volume()
 OUTPUTS_VOLUME_NAME = OUTPUTS_VOLUME.name or f"{CONF.name}-outputs"
 
 runtime_image = patch_image_for_helper(
-    modal.Image.from_registry(
+    modal.Image
+    .from_registry(
         "nvidia/cuda:12.8.1-devel-ubuntu24.04", add_python=CONF.python_version
     )
     .entrypoint([])  # remove verbose logging by base image on entry
@@ -128,12 +129,10 @@ runtime_image = patch_image_for_helper(
         )
     )
     # Build GROMACS
-    .env(
-        {
-            "PATH": "/usr/local/gromacs/bin:/root/micromamba/bin:$PATH",
-            "LD_LIBRARY_PATH": "/usr/local/lib:/usr/lib:${LD_LIBRARY_PATH}",
-        }
-    )
+    .env({
+        "PATH": "/usr/local/gromacs/bin:/root/micromamba/bin:$PATH",
+        "LD_LIBRARY_PATH": "/usr/local/lib:/usr/lib:${LD_LIBRARY_PATH}",
+    })
     .run_commands(
         " && ".join(
             (
@@ -177,7 +176,8 @@ runtime_image = patch_image_for_helper(
 )
 
 biotite_image = patch_image_for_helper(
-    modal.Image.debian_slim(python_version=CONF.python_version)
+    modal.Image
+    .debian_slim(python_version=CONF.python_version)
     .apt_install("git", "build-essential")
     .uv_pip_install("biotite", "numpy", "scipy", "seaborn", "matplotlib")
 )
@@ -217,15 +217,13 @@ def prepare_tpr_gpu(
     ld_seed: int = -1,
     gen_seed: int = -1,
     genion_seed: int = 0,
-) -> Path:
+) -> str:
     """Prepare inputs for production Gromacs run.
 
     Steps: clean input PDB, build topology with Amber FF19SB and TIP3P water,
     solvate, add ions, minimize (em and cg), equilibrate (NVT and NPT), and
     generate production TPR file.
     """
-    from pathlib import Path
-
     work_path = Path(CONF.output_volume_mountpoint) / run_name
     work_path.mkdir(parents=True, exist_ok=True)
 
@@ -238,7 +236,7 @@ def prepare_tpr_gpu(
         )
     ):
         print("✅ Preparation already completed, skipping.")
-        return work_path
+        return str(work_path)
 
     input_pdb_path = work_path / f"{run_name}.pdb"
     input_pdb_path.write_bytes(pdb_content)
@@ -271,7 +269,7 @@ def prepare_tpr_gpu(
     # Modal adds this automatically but we want Gromacs to handle threading
     _ = run_command(cmd, cwd=str(work_path), env={"OMP_NUM_THREADS": None})
     OUTPUTS_VOLUME.commit()
-    return work_path
+    return str(work_path)
 
 
 @app.function(
@@ -290,15 +288,13 @@ def prepare_tpr_cpu(
     ld_seed: int = -1,
     gen_seed: int = -1,
     genion_seed: int = 0,
-) -> Path:
+) -> str:
     """Prepare inputs for production Gromacs run.
 
     Steps: clean input PDB, build topology with Amber FF19SB and TIP3P water,
     solvate, add ions, minimize (em and cg), equilibrate (NVT and NPT), and
     generate production TPR file.
     """
-    from pathlib import Path
-
     work_path = Path(CONF.output_volume_mountpoint) / run_name
     work_path.mkdir(parents=True, exist_ok=True)
 
@@ -311,7 +307,7 @@ def prepare_tpr_cpu(
         )
     ):
         print("✅ Preparation already completed, skipping.")
-        return work_path
+        return str(work_path)
 
     input_pdb_path = work_path / f"{run_name}.pdb"
     input_pdb_path.write_bytes(pdb_content)
@@ -345,7 +341,7 @@ def prepare_tpr_cpu(
     _ = run_command(cmd, cwd=str(work_path), env={"OMP_NUM_THREADS": None})
 
     OUTPUTS_VOLUME.commit()
-    return work_path
+    return str(work_path)
 
 
 @app.function(
@@ -356,8 +352,6 @@ def prepare_tpr_cpu(
 )
 def find_traj_last_step(traj_file: str, topology_file: str) -> int:
     """Calculated simulated steps from the simulation time (in ps) in a trajectory."""
-    from pathlib import Path
-
     import biotite.structure as struc
     import biotite.structure.io as strucio
     import biotite.structure.io.xtc as xtc
@@ -394,10 +388,9 @@ def production_run_gpu(
     simulation_time_ns: int,
     num_threads: int = APP_INFO.gmx_threads,
     use_openmp_threads: bool = False,
-) -> Path:
+) -> str:
     """Production Gromacs run."""
     import shutil
-    from pathlib import Path
 
     work_path = Path(CONF.output_volume_mountpoint) / run_name
     deffnm = f"production_{run_name}"
@@ -411,13 +404,13 @@ def production_run_gpu(
     nsteps = -2  # default: find nsteps from the mdp file
     if traj_file_path.exists() and checkpoint_file_path.exists():
         simulated_steps = find_traj_last_step.remote(
-            str(traj_file_path), str(work_path / f"{run_name}.pdb")
+            str(traj_file_path), str(work_path / f"{run_name}_input.pdb")
         )
         total_steps = simulation_time_ns * 500000  # 2 fs timestep
         nsteps = total_steps - simulated_steps
         if nsteps <= 0:
             print("✅ Production run already completed, skipping.")
-            return work_path
+            return str(work_path)
 
     gmx = shutil.which("gmx_mpi") if use_openmp_threads else shutil.which("gmx")
     if gmx is None:
@@ -453,7 +446,7 @@ def production_run_gpu(
     # Modal adds this automatically but we want Gromacs to handle threading
     _ = run_command(cmd, cwd=str(work_path), env={"OMP_NUM_THREADS": None})
     OUTPUTS_VOLUME.commit()
-    return work_path
+    return str(work_path)
 
 
 @app.function(
@@ -467,10 +460,9 @@ def production_run_cpu(
     simulation_time_ns: int,
     num_threads: int = APP_INFO.gmx_threads,
     use_openmp_threads: bool = False,
-) -> Path:
+) -> str:
     """Production Gromacs run."""
     import shutil
-    from pathlib import Path
 
     work_path = Path(CONF.output_volume_mountpoint) / run_name
     deffnm = f"production_{run_name}"
@@ -490,7 +482,7 @@ def production_run_cpu(
         nsteps = total_steps - simulated_steps
         if nsteps <= 0:
             print("✅ Production run already completed, skipping.")
-            return work_path
+            return str(work_path)
 
         print(f"Continuing production run for additional {nsteps} steps...")
 
@@ -526,7 +518,7 @@ def production_run_cpu(
     # Modal adds this automatically but we want Gromacs to handle threading
     _ = run_command(cmd, cwd=str(work_path), env={"OMP_NUM_THREADS": None})
     OUTPUTS_VOLUME.commit()
-    return work_path
+    return str(work_path)
 
 
 @app.function(
@@ -541,13 +533,11 @@ def postprocess_traj(
     run_name: str,
     save_processed_traj: bool = False,
     make_figures: bool = True,
-) -> Path:
+) -> str:
     """Process Gromacs trajectory and generate analysis plots.
 
     Ref: https://www.biotite-python.org/latest/examples/gallery/structure/modeling/md_analysis.html
     """
-    from pathlib import Path
-
     import biotite
     import biotite.structure as struc
     import biotite.structure.io as strucio
@@ -556,7 +546,7 @@ def postprocess_traj(
     import numpy as np
 
     work_path = Path(CONF.output_volume_mountpoint) / run_name
-    input_pdb_path = work_path / f"{run_name}.pdb"
+    input_pdb_path = work_path / f"{run_name}_input.pdb"  # with solvation
     if not input_pdb_path.exists():
         raise FileNotFoundError(f"Input PDB file not found: {input_pdb_path}")
     traj_path = work_path / f"{traj_prefix}{run_name}.xtc"
@@ -586,7 +576,7 @@ def postprocess_traj(
 
     # Get simulation time (ns) for plotting purposes
     time = xtc_file.get_time() / 1000.0
-    print(f"Simulated {time[-1]:.1f} ns")
+    print(f"Simulated {time[-1]:.1f} ns in {traj_path}")
 
     # Remove PBC (gmx trjconv)
     trajectory = struc.remove_pbc(trajectory)
@@ -705,7 +695,7 @@ def postprocess_traj(
 
             OUTPUTS_VOLUME.commit()
 
-    return work_path
+    return str(work_path)
 
 
 ##########################################
@@ -795,6 +785,8 @@ def submit_gromacs_task(
 
     _ = modal.FunctionCall.gather(*process_traj_tasks, prod_traj_task)
 
-    remote_volume_dir = remote_workdir.relative_to(CONF.output_volume_mountpoint)
+    remote_volume_dir = PurePosixPath(remote_workdir).relative_to(
+        CONF.output_volume_mountpoint
+    )
     print("🧬 Gromacs preparation complete! Check data with: \n")
     print(f"  modal volume ls {OUTPUTS_VOLUME_NAME} {remote_volume_dir}")
