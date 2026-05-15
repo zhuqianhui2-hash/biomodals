@@ -127,6 +127,10 @@ def list_available_apps(
         "\n:dna: To run an application on [link=https://modal.com]modal.com[/link], use:\n"
         r"     [bold]biomodals run <[green]app-name-or-path[/green]>[/bold] -- [gray]\[OPTIONS][/gray]"
     )
+    console.print(
+        "\n:dna: If an app contains multiple local entrypoints, use it as:\n"
+        "     [bold]<[green]app-name-or-path[/green]>::<[green]function-name[/green]>[/bold]\n"
+    )
     console.print("\n:dna: [bold]Available biomodals applications:[/bold]")
     console.print(table)
     return available_apps
@@ -189,21 +193,14 @@ def show_app_help(
                     console.print(Markdown(f.docstring))
 
     if f_indices := app._local_entrypoint_idx:
-        _print_title("Local entrypoints in this app")
-        num_entrypoints = len(f_indices)
-        if num_entrypoints > 1:
-            console.print(
-                f"[red]{num_entrypoints} entrypoints found, "
-                "showing help for the first one with docs:[/red]\n"
-            )
+        _print_title("Local entrypoint(s) in this app")
         for f_idx in f_indices:
             f = app[f_idx]
 
             if f.args_table:
                 console.print(f"[bold green]{f.name}[/bold green] CLI flags:\n")
                 console.print(Markdown("\n".join(f.args_table)))
-                return
-            elif f.docstring and verbose:
+            elif f.docstring:
                 console.print(f"[bold green]{f.name}[/bold green] documentation:\n")
                 console.print(Markdown(f.docstring))
 
