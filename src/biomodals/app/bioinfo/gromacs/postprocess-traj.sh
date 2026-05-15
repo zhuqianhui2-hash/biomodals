@@ -8,7 +8,6 @@ set -o pipefail
 if [[ "${TRACE-0}" == "1" ]]; then
     set -o xtrace
 fi
-
 # CLI argument parsing
 DOCSTRING="usage: ./$(basename "${0}")
 
@@ -58,6 +57,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -s|--ref-structure)
+      # shellcheck disable=SC2034
       ref_structure="${2}"
       shift
       shift

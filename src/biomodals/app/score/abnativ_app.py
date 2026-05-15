@@ -40,7 +40,8 @@ ABNATIV_MODEL_DIR = "/root/.abnativ/models/pretrained_models"
 # Image and app definitions
 ##########################################
 runtime_image = patch_image_for_helper(
-    modal.Image.micromamba(python_version=CONF.python_version)
+    modal.Image
+    .micromamba(python_version=CONF.python_version)
     .apt_install("git", "build-essential", "wget", "zstd")
     .env(CONF.default_env)
     .micromamba_install(["openmm", "pdbfixer", "biopython"], channels=["conda-forge"])
