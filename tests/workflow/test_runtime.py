@@ -3,6 +3,7 @@
 # ruff: noqa: D101,D102,D103,D107
 
 from pathlib import Path
+from threading import Barrier, BrokenBarrierError
 
 from biomodals.schema import (
     AppOutput,
@@ -119,8 +120,34 @@ def test_independent_ready_nodes_run_in_same_scheduler_wave(
     )
     runtime.run(run_id="run-1")
 
-    assert calls == ["score-a", "score-b"]
+    assert set(calls) == {"score-a", "score-b"}
     assert runtime.executed_waves == [["score-a", "score-b"]]
+
+
+def test_independent_ready_nodes_execute_concurrently(tmp_path: Path) -> None:
+    barrier = Barrier(2, timeout=0.5)
+    workflow = Workflow("demo")
+
+    class BarrierNode(WorkflowNativeNode):
+        def run(self, context):
+            try:
+                barrier.wait()
+            except BrokenBarrierError:
+                return AppRunResult(status=AppRunStatus.FAILED)
+            return AppRunResult(status=AppRunStatus.SUCCEEDED)
+
+    workflow.add_node(BarrierNode(), id="one")
+    workflow.add_node(BarrierNode(), id="two")
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+    )
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.SUCCEEDED
+    assert runtime.executed_waves == [["one", "two"]]
 
 
 def test_failed_node_prevents_downstream_nodes_from_running(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from biomodals.schema import (
@@ -92,8 +93,7 @@ class WorkflowRuntime:
                 )
 
             self.executed_waves.append(ready)
-            for node_id in ready:
-                node_result = self._run_node(node_id)
+            for node_id, node_result in self._run_ready_nodes(ready):
                 if node_result.status == AppRunStatus.FAILED:
                     self.ledger.mark_node_failed(node_id, "Node returned failed status")
                     return AppRunResult(status=AppRunStatus.FAILED)
@@ -102,6 +102,32 @@ class WorkflowRuntime:
         return {
             node_id for node_id in node_ids if self.ledger.node_is_complete(node_id)
         }
+
+    def _run_ready_nodes(self, node_ids: list[str]) -> list[tuple[str, AppRunResult]]:
+        if len(node_ids) == 1:
+            node_id = node_ids[0]
+            return [(node_id, self._run_node(node_id))]
+
+        results: list[tuple[str, AppRunResult]] = []
+        with ThreadPoolExecutor(max_workers=len(node_ids)) as executor:
+            futures = {
+                executor.submit(self._run_node, node_id): node_id
+                for node_id in node_ids
+            }
+            for future in as_completed(futures):
+                node_id = futures[future]
+                try:
+                    results.append((node_id, future.result()))
+                except Exception as exc:  # noqa: BLE001
+                    self.ledger.mark_node_failed(node_id, str(exc))
+                    results.append((
+                        node_id,
+                        AppRunResult(
+                            status=AppRunStatus.FAILED,
+                            warnings=[str(exc)],
+                        ),
+                    ))
+        return results
 
     def _run_node(self, node_id: str) -> AppRunResult:
         definition = self.workflow.validate()
