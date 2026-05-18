@@ -6,6 +6,7 @@ import pytest
 
 from biomodals.workflow.ppiflow_v2 import (
     PPI_FLOW_OUTPUT_LAYOUT,
+    PPI_FLOW_V2_EXECUTION_STATUS,
     build_ppiflow_workflow,
 )
 
@@ -112,3 +113,7 @@ def test_expected_output_layout_matches_legacy_archive_shape() -> None:
         "design_output/ranked_designs.csv",
         "design_output/design_report.md",
     )
+
+
+def test_ppiflow_v2_is_explicitly_definition_only() -> None:
+    assert PPI_FLOW_V2_EXECUTION_STATUS == "definition-only"

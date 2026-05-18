@@ -119,6 +119,15 @@ task queue until empty, then the node writes a single completion status.
 Independent ready nodes may run in parallel when all dependencies for each node
 are satisfied.
 
+## PPIFlow V2 Status
+
+`src/biomodals/workflow/ppiflow_v2.py` is currently a definition-only DAG
+scaffold. It accepts upstream-style `task.yaml`, `steps.yaml`, and `stage`
+inputs, then models the intended node graph and legacy output layout. It is not
+an executable replacement for `ppiflow_workflow.py` until each app-backed node
+is wired to a workflow-compatible app function and native filter/report nodes
+implement result processing.
+
 ## App Interfaces
 
 Local entrypoints stay CLI-only. They parse local paths, submit remote work,

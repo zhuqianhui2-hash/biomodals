@@ -1,4 +1,10 @@
-"""PPIFlow workflow definition built on the reusable workflow builder."""
+"""PPIFlow DAG definition built on the reusable workflow builder.
+
+This module is intentionally definition-only in the first workflow runtime
+slice. It preserves the legacy PPIFlow stage graph and expected archive layout,
+but its nodes are not executable until the corresponding workflow-compatible
+app functions and native filter/report implementations are wired.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ PPI_FLOW_OUTPUT_LAYOUT = (
     "design_output/ranked_designs.csv",
     "design_output/design_report.md",
 )
+PPI_FLOW_V2_EXECUTION_STATUS = "definition-only"
 
 
 @dataclass

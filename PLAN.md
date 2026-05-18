@@ -768,6 +768,13 @@ Expected: discovery and pre-commit checks pass.
 
 - Keep: `src/biomodals/workflow/ppiflow_workflow.py`
 
+**Implementation status:** The first branch implements PPIFlow v2 as a
+definition-only DAG scaffold. It validates upstream-style inputs, stage
+selection, dependencies, and expected output layout, but it is not yet an
+executable replacement for `ppiflow_workflow.py`. Full execution is deferred
+until app-backed nodes are wired to workflow-compatible app functions and
+workflow-native filter/report nodes implement result processing.
+
 - [ ] **Step 1: Model the current PPIFlow stages as workflow nodes**
 
 Use these initial node boundaries:
