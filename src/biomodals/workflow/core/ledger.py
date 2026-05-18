@@ -17,6 +17,7 @@ from biomodals.schema import (
     NodePlacement,
     NodeStatus,
     NodeStatusRecord,
+    RunStatus,
     WorkflowArtifact,
     WorkflowRun,
 )
@@ -51,6 +52,13 @@ class WorkflowLedger:
         self.workflow_name = workflow_name
         self.run_id = run_id
         return WorkflowRun.model_validate(self._read_json(self.run_root / "run.json"))
+
+    def mark_run_status(self, status: RunStatus) -> WorkflowRun:
+        """Update the durable status for the active workflow run."""
+        run = WorkflowRun.model_validate(self._read_json(self.run_root / "run.json"))
+        updated = run.model_copy(update={"status": status})
+        self._write_json(self.run_root / "run.json", updated)
+        return updated
 
     def mark_node_pending(self, node_id: str) -> NodeStatusRecord:
         """Mark a node as pending."""

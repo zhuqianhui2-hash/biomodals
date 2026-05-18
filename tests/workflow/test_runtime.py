@@ -12,6 +12,7 @@ from biomodals.schema import (
     ArtifactKind,
     InlineBytes,
     NodeExecutionPolicy,
+    RunStatus,
     VolumePath,
     WorkflowArtifact,
     WorkflowRun,
@@ -266,6 +267,39 @@ def test_runtime_passes_selected_upstream_artifacts_to_node_context(
     }
     status = runtime.ledger._load_node_status_or_default("score")
     assert status.input_artifact_ids == ["design-structures"]
+
+
+def test_runtime_records_succeeded_run_status(tmp_path: Path) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(FakeNode(), id="one")
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+    )
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.SUCCEEDED
+    assert runtime.ledger.load_run("demo", "run-1").status == RunStatus.SUCCEEDED
+
+
+def test_runtime_records_failed_run_status(tmp_path: Path) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(
+        FakeNode(result=AppRunResult(status=AppRunStatus.FAILED)),
+        id="fail",
+    )
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+    )
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.FAILED
+    assert runtime.ledger.load_run("demo", "run-1").status == RunStatus.FAILED
 
 
 def test_runtime_reloads_and_commits_workflow_volume(tmp_path: Path) -> None:

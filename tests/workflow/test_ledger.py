@@ -12,6 +12,7 @@ from biomodals.schema import (
     ArtifactKind,
     InlineBytes,
     NodeStatus,
+    RunStatus,
     VolumePath,
     WorkflowArtifact,
     WorkflowRun,
@@ -33,6 +34,17 @@ def test_create_run_writes_and_loads_run_json(tmp_path: Path) -> None:
     assert created == run
     assert loaded == run
     assert tmp_path.joinpath("ppiflow", "run-1", "run.json").exists()
+
+
+def test_mark_run_status_updates_run_json(tmp_path: Path) -> None:
+    ledger = WorkflowLedger(tmp_path)
+    ledger.create_run(WorkflowRun(workflow_name="ppiflow", run_id="run-1"))
+
+    updated = ledger.mark_run_status(RunStatus.RUNNING)
+    loaded = ledger.load_run("ppiflow", "run-1")
+
+    assert updated.status == RunStatus.RUNNING
+    assert loaded.status == RunStatus.RUNNING
 
 
 def test_node_status_attempt_app_result_and_artifacts_are_recorded(

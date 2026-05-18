@@ -11,6 +11,7 @@ from biomodals.schema import (
     AppRunStatus,
     ArtifactSelector,
     AttemptRecord,
+    RunStatus,
     WorkflowArtifact,
     WorkflowRun,
 )
@@ -90,10 +91,14 @@ class WorkflowRuntime:
                 WorkflowRun(workflow_name=definition.name, run_id=run_id)
             )
             self._commit_volume()
+        self.ledger.mark_run_status(RunStatus.RUNNING)
+        self._commit_volume()
 
         while True:
             completed = self._completed_nodes(definition.nodes.keys())
             if len(completed) == len(definition.nodes):
+                self.ledger.mark_run_status(RunStatus.SUCCEEDED)
+                self._commit_volume()
                 return AppRunResult(status=AppRunStatus.SUCCEEDED)
 
             ready = [
@@ -104,6 +109,8 @@ class WorkflowRuntime:
                 and not self.ledger.node_is_complete(node_id)
             ]
             if not ready:
+                self.ledger.mark_run_status(RunStatus.FAILED)
+                self._commit_volume()
                 return AppRunResult(
                     status=AppRunStatus.FAILED,
                     warnings=["No runnable workflow nodes remain"],
@@ -113,6 +120,7 @@ class WorkflowRuntime:
             for node_id, node_result in self._run_ready_nodes(ready):
                 if node_result.status == AppRunStatus.FAILED:
                     self.ledger.mark_node_failed(node_id, "Node returned failed status")
+                    self.ledger.mark_run_status(RunStatus.FAILED)
                     self._commit_volume()
                     return AppRunResult(status=AppRunStatus.FAILED)
 
