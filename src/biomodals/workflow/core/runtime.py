@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Protocol
 
 from biomodals.schema import (
     AppRunResult,
@@ -19,6 +20,16 @@ from biomodals.workflow.core.ledger import WorkflowLedger
 from biomodals.workflow.core.nodes import NodeRunContext
 
 
+class WorkflowVolume(Protocol):
+    """Minimal Modal Volume boundary used by the workflow runtime."""
+
+    def commit(self) -> object:
+        """Persist pending writes to the mounted volume."""
+
+    def reload(self) -> object:
+        """Refresh local view of writes made by other containers."""
+
+
 class WorkflowRuntime:
     """Local runtime core for scheduling workflow nodes against a ledger."""
 
@@ -28,11 +39,13 @@ class WorkflowRuntime:
         workflow: Workflow,
         volume_root: str | Path,
         workflow_volume_name: str,
+        workflow_volume: WorkflowVolume | None = None,
     ):
         """Initialize a runtime for one workflow and ledger root."""
         self.workflow = workflow
         self.volume_root = Path(volume_root)
         self.workflow_volume_name = workflow_volume_name
+        self.workflow_volume = workflow_volume
         self.ledger = WorkflowLedger(self.volume_root)
         self.executed_waves: list[list[str]] = []
 
@@ -44,6 +57,7 @@ class WorkflowRuntime:
         workflow_definition: Workflow | dict[str, object],
         volume_root: str | Path,
         workflow_volume_name: str | None = None,
+        workflow_volume: WorkflowVolume | None = None,
     ) -> WorkflowRuntime:
         """Create a runtime from a Python workflow definition."""
         if isinstance(workflow_definition, Workflow):
@@ -57,6 +71,7 @@ class WorkflowRuntime:
                 workflow_volume_name=(
                     workflow_volume_name or f"{workflow_name}-outputs"
                 ),
+                workflow_volume=workflow_volume,
             )
         raise NotImplementedError(
             "Serialized workflow definition dictionaries are deferred; pass a "
@@ -67,12 +82,14 @@ class WorkflowRuntime:
         """Run the workflow until every node succeeds or no progress is possible."""
         definition = self.workflow.validate()
         run_path = self.volume_root / definition.name / run_id / "run.json"
+        self._reload_volume()
         if run_path.exists() and not force:
             self.ledger.load_run(definition.name, run_id)
         else:
             self.ledger.create_run(
                 WorkflowRun(workflow_name=definition.name, run_id=run_id)
             )
+            self._commit_volume()
 
         while True:
             completed = self._completed_nodes(definition.nodes.keys())
@@ -96,6 +113,7 @@ class WorkflowRuntime:
             for node_id, node_result in self._run_ready_nodes(ready):
                 if node_result.status == AppRunStatus.FAILED:
                     self.ledger.mark_node_failed(node_id, "Node returned failed status")
+                    self._commit_volume()
                     return AppRunResult(status=AppRunStatus.FAILED)
 
     def _completed_nodes(self, node_ids) -> set[str]:
@@ -120,6 +138,7 @@ class WorkflowRuntime:
                     results.append((node_id, future.result()))
                 except Exception as exc:  # noqa: BLE001
                     self.ledger.mark_node_failed(node_id, str(exc))
+                    self._commit_volume()
                     results.append((
                         node_id,
                         AppRunResult(
@@ -163,6 +182,7 @@ class WorkflowRuntime:
         )
         self.ledger.record_app_result(node_id, attempt_id, result)
         if result.status == AppRunStatus.FAILED:
+            self._commit_volume()
             return result
 
         artifacts = materialize_app_run_result(
@@ -178,12 +198,14 @@ class WorkflowRuntime:
             node_id,
             [artifact.artifact_id for artifact in artifacts],
         )
+        self._commit_volume()
         return result
 
     def _resolve_inputs(
         self,
         selectors: dict[str, ArtifactSelector],
     ) -> dict[str, list[WorkflowArtifact]]:
+        self._reload_volume()
         return {
             input_name: self.ledger.select_artifacts(selector)
             for input_name, selector in selectors.items()
@@ -208,3 +230,11 @@ class WorkflowRuntime:
             / "attempts"
             / attempt.attempt_id
         )
+
+    def _commit_volume(self) -> None:
+        if self.workflow_volume is not None:
+            self.workflow_volume.commit()
+
+    def _reload_volume(self) -> None:
+        if self.workflow_volume is not None:
+            self.workflow_volume.reload()

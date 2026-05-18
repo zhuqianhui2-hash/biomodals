@@ -79,6 +79,7 @@ def _materialize_inline_bytes(
     attempt_dir: Path,
     volume_root: Path | None,
     producing_node_id: str,
+    metadata: dict[str, Any] | None = None,
 ) -> WorkflowArtifact:
     artifact_id = _artifact_id(producing_node_id, output_name)
     safe_filename = sanitize_filename(storage.filename)
@@ -104,6 +105,7 @@ def _materialize_inline_bytes(
         ),
         files=_artifact_files(materialized_dir),
         source_app_output_name=output_name,
+        metadata=metadata or {},
     )
 
 
@@ -135,6 +137,7 @@ def materialize_app_run_result(
                 attempt_dir=attempt_dir,
                 volume_root=volume_root,
                 producing_node_id=producing_node_id,
+                metadata=output.metadata,
             )
         else:
             artifact = WorkflowArtifact(

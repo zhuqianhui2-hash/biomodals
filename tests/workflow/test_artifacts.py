@@ -95,6 +95,32 @@ def test_materialized_inline_artifact_path_is_volume_relative(
     )
 
 
+def test_materialize_inline_bytes_preserves_output_metadata(
+    tmp_path: Path,
+) -> None:
+    result = AppRunResult(
+        status=AppRunStatus.SUCCEEDED,
+        outputs=[
+            AppOutput(
+                name="summary",
+                kind=ArtifactKind.REPORT,
+                storage=InlineBytes(data=b"ok\n", filename="summary.txt"),
+                metadata={"stage": "stage1"},
+            )
+        ],
+    )
+
+    artifacts = materialize_app_run_result(
+        result=result,
+        workflow_volume_name="Workflow-outputs",
+        attempt_dir=tmp_path / "attempt",
+        artifact_dir=tmp_path / "artifacts",
+        producing_node_id="summary",
+    )
+
+    assert artifacts[0].metadata == {"stage": "stage1"}
+
+
 def test_materialize_volume_path_references_existing_remote_output(
     tmp_path: Path,
 ) -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from biomodals.schema import AppRunResult, AppRunStatus
 from biomodals.workflow import Workflow
-from biomodals.workflow.core import orchestrator_app
+from biomodals.workflow.core import orchestrator
 from biomodals.workflow.core.nodes import WorkflowNativeNode
 from biomodals.workflow.core.runtime import WorkflowRuntime
 
@@ -28,11 +28,13 @@ def test_orchestrator_helper_uses_runtime_from_definition(monkeypatch) -> None:
             workflow_definition: dict[str, object],
             volume_root: Path,
             workflow_volume_name: str,
+            workflow_volume=None,
         ):
             calls["workflow_name"] = workflow_name
             calls["workflow_definition"] = workflow_definition
             calls["volume_root"] = volume_root
             calls["workflow_volume_name"] = workflow_volume_name
+            calls["workflow_volume"] = workflow_volume
             return cls()
 
         def run(self, *, run_id: str, force: bool = False) -> AppRunResult:
@@ -40,17 +42,14 @@ def test_orchestrator_helper_uses_runtime_from_definition(monkeypatch) -> None:
             calls["force"] = force
             return AppRunResult(status=AppRunStatus.SUCCEEDED)
 
-    monkeypatch.setattr(orchestrator_app, "WorkflowRuntime", FakeRuntime)
-    monkeypatch.setattr(
-        orchestrator_app.CONF,
-        "output_volume_mountpoint",
-        "/workflow-outputs",
-    )
+    monkeypatch.setattr(orchestrator, "WorkflowRuntime", FakeRuntime)
 
-    result = orchestrator_app._run_workflow_orchestrator(
+    result = orchestrator.run_workflow_definition(
         workflow_name="demo",
         run_id="run-1",
         workflow_definition={"nodes": []},
+        volume_root=Path("/workflow-outputs"),
+        workflow_volume_name="WorkflowOrchestrator-outputs",
         force=True,
     )
 
@@ -60,6 +59,7 @@ def test_orchestrator_helper_uses_runtime_from_definition(monkeypatch) -> None:
         "workflow_definition": {"nodes": []},
         "volume_root": Path("/workflow-outputs"),
         "workflow_volume_name": "WorkflowOrchestrator-outputs",
+        "workflow_volume": None,
         "run_id": "run-1",
         "force": True,
     }

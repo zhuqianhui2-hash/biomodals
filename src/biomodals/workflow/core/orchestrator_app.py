@@ -12,7 +12,7 @@ from biomodals.app.constant import MAX_TIMEOUT
 from biomodals.helper import patch_image_for_helper
 from biomodals.schema import AppRunResult
 from biomodals.workflow.core.builder import Workflow
-from biomodals.workflow.core.runtime import WorkflowRuntime
+from biomodals.workflow.core.orchestrator import run_workflow_definition
 
 CONF = AppConfig(
     tags={"group": "workflow"},
@@ -37,13 +37,15 @@ def _run_workflow_orchestrator(
     workflow_definition: Workflow | dict[str, object],
     force: bool = False,
 ) -> AppRunResult:
-    runtime = WorkflowRuntime.from_definition(
+    return run_workflow_definition(
         workflow_name=workflow_name,
+        run_id=run_id,
         workflow_definition=workflow_definition,
         volume_root=Path(CONF.output_volume_mountpoint),
         workflow_volume_name=OUT_VOLUME_NAME,
+        workflow_volume=OUT_VOLUME,
+        force=force,
     )
-    return runtime.run(run_id=run_id, force=force)
 
 
 @app.function(

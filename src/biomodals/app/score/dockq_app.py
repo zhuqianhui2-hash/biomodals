@@ -30,8 +30,8 @@ import modal
 import polars as pl
 
 from biomodals.app.config import AppConfig
-from biomodals.app.helper import patch_image_for_helper
-from biomodals.app.helper.shell import package_outputs, sanitize_filename
+from biomodals.helper import patch_image_for_helper
+from biomodals.helper.shell import package_outputs, sanitize_filename
 
 ##########################################
 # Modal configs

@@ -85,7 +85,8 @@ Create or modify these files.
 - Create `src/biomodals/workflow/core/nodes.py`: base workflow node protocol plus app-backed and workflow-native node helpers.
 - Create `src/biomodals/workflow/core/builder.py`: Python workflow definition API and DAG validation.
 - Create `src/biomodals/workflow/core/runtime.py`: scheduler, skip-if-complete logic, parallel ready-node execution, and node placement dispatch.
-- Create `src/biomodals/workflow/core/orchestrator_app.py`: remote Modal workflow orchestrator function and local submission helper.
+- Create `src/biomodals/workflow/core/orchestrator.py`: pure workflow orchestrator boundary helper.
+- Create `src/biomodals/workflow/core/orchestrator_app.py`: remote Modal workflow orchestrator function.
 - Create `src/biomodals/workflow/core/workers.py`: reusable worker-pool queue helpers for fan-out nodes.
 - Modify `src/biomodals/workflow/__init__.py`: export the builder and core runtime types.
 - Keep `src/biomodals/workflow/ppiflow_workflow.py` intact during the first runtime extraction; use it as a behavioral reference.
@@ -586,6 +587,8 @@ Expected: all tests pass.
 
 **Files:**
 
+- Create: `src/biomodals/workflow/core/orchestrator.py`
+
 - Create: `src/biomodals/workflow/core/orchestrator_app.py`
 
 - Modify: `src/biomodals/workflow/__init__.py`
@@ -658,10 +661,10 @@ Run:
 
 ```bash
 rtk uv run biomodals list
-rtk uv run biomodals help workflow-orchestrator
+rtk uv run biomodals help workflow-ppiflow
 ```
 
-Expected: app discovery works once the new orchestrator is registered with the CLI discovery mechanism.
+Expected: app discovery works and workflow discovery exposes executable workflow scripts. Runtime-only orchestrator internals stay under `biomodals.workflow.core` and are not listed as user workflows.
 
 ### Task 7: Add Worker Pool Helpers
 

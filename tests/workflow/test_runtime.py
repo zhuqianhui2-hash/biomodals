@@ -58,6 +58,18 @@ class ExplodingNode(WorkflowNativeNode):
         raise AssertionError(f"{context.node_id} should not run")
 
 
+class FakeVolume:
+    def __init__(self) -> None:
+        self.commit_count = 0
+        self.reload_count = 0
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+    def reload(self) -> None:
+        self.reload_count += 1
+
+
 def test_completed_nodes_are_skipped(tmp_path: Path) -> None:
     workflow = Workflow("demo")
     workflow.add_node(ExplodingNode(), id="done")
@@ -254,3 +266,21 @@ def test_runtime_passes_selected_upstream_artifacts_to_node_context(
     }
     status = runtime.ledger._load_node_status_or_default("score")
     assert status.input_artifact_ids == ["design-structures"]
+
+
+def test_runtime_reloads_and_commits_workflow_volume(tmp_path: Path) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(FakeNode(), id="one")
+    volume = FakeVolume()
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+        workflow_volume=volume,
+    )
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.SUCCEEDED
+    assert volume.reload_count >= 1
+    assert volume.commit_count >= 1
