@@ -333,7 +333,7 @@ def _flowpacker_app_run_result(
         outputs=[
             AppOutput(
                 name="flowpacker_outputs",
-                kind=ArtifactKind.ARCHIVE,
+                kind=ArtifactKind.STRUCTURES,
                 storage=InlineBytes(
                     data=tarball_bytes,
                     filename=f"{run_name}.tar.zst",

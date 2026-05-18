@@ -7,7 +7,9 @@ from pathlib import Path
 from biomodals.schema import (
     AppRunResult,
     AppRunStatus,
+    ArtifactSelector,
     AttemptRecord,
+    WorkflowArtifact,
     WorkflowRun,
 )
 from biomodals.workflow.artifacts import materialize_app_run_result
@@ -38,12 +40,26 @@ class WorkflowRuntime:
         cls,
         *,
         workflow_name: str,
-        workflow_definition: dict[str, object],
+        workflow_definition: Workflow | dict[str, object],
         volume_root: str | Path,
+        workflow_volume_name: str | None = None,
     ) -> WorkflowRuntime:
-        """Create a runtime from a serialized workflow definition."""
+        """Create a runtime from a Python workflow definition."""
+        if isinstance(workflow_definition, Workflow):
+            if workflow_definition.name != workflow_name:
+                raise ValueError(
+                    "workflow_name must match the supplied Workflow definition"
+                )
+            return cls(
+                workflow=workflow_definition,
+                volume_root=volume_root,
+                workflow_volume_name=(
+                    workflow_volume_name or f"{workflow_name}-outputs"
+                ),
+            )
         raise NotImplementedError(
-            "Serialized workflow definitions are deferred from the first runtime core"
+            "Serialized workflow definition dictionaries are deferred; pass a "
+            "Python Workflow object to the first runtime"
         )
 
     def run(self, *, run_id: str, force: bool = False) -> AppRunResult:
@@ -91,20 +107,33 @@ class WorkflowRuntime:
         definition = self.workflow.validate()
         spec = definition.nodes[node_id]
         attempt_id = self._next_attempt_id(node_id)
-        self.ledger.mark_node_running(node_id, attempt_id)
+        inputs = self._resolve_inputs(spec.inputs)
+        input_artifact_ids = [
+            artifact.artifact_id
+            for artifacts in inputs.values()
+            for artifact in artifacts
+        ]
+        self.ledger.mark_node_running(
+            node_id,
+            attempt_id,
+            input_artifact_ids=input_artifact_ids,
+            execution_policy=spec.node.execution_policy,
+            placement=spec.node.placement,
+        )
         attempt = self.ledger.record_attempt_started(node_id, attempt_id)
         attempt_dir = self._attempt_dir(attempt)
         cache_dir = self.ledger.run_root / "nodes" / node_id / "cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        result = spec.node.run(
+        result = self._dispatch_node(
+            spec.node,
             NodeRunContext(
                 run_id=self.ledger.run_id or "",
                 node_id=node_id,
                 attempt_id=attempt_id,
                 cache_dir=cache_dir,
-                inputs={},
-            )
+                inputs=inputs,
+            ),
         )
         self.ledger.record_app_result(node_id, attempt_id, result)
         if result.status == AppRunStatus.FAILED:
@@ -116,6 +145,7 @@ class WorkflowRuntime:
             attempt_dir=attempt_dir,
             artifact_dir=self.ledger.run_root / "artifacts",
             producing_node_id=node_id,
+            volume_root=self.volume_root,
         )
         self.ledger.record_artifacts(artifacts)
         self.ledger.mark_node_succeeded(
@@ -123,6 +153,19 @@ class WorkflowRuntime:
             [artifact.artifact_id for artifact in artifacts],
         )
         return result
+
+    def _resolve_inputs(
+        self,
+        selectors: dict[str, ArtifactSelector],
+    ) -> dict[str, list[WorkflowArtifact]]:
+        return {
+            input_name: self.ledger.select_artifacts(selector)
+            for input_name, selector in selectors.items()
+        }
+
+    @staticmethod
+    def _dispatch_node(node, context: NodeRunContext) -> AppRunResult:
+        return node.run(context)
 
     def _next_attempt_id(self, node_id: str) -> str:
         attempts_dir = self.ledger.run_root / "nodes" / node_id / "attempts"

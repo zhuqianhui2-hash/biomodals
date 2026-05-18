@@ -62,6 +62,39 @@ def test_materialize_inline_bytes_writes_raw_and_volume_artifact(
     assert (tmp_path / "artifacts" / "summary-summary.json").exists()
 
 
+def test_materialized_inline_artifact_path_is_volume_relative(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "demo" / "run-1"
+    result = AppRunResult(
+        status=AppRunStatus.SUCCEEDED,
+        outputs=[
+            AppOutput(
+                name="summary",
+                kind=ArtifactKind.REPORT,
+                storage=InlineBytes(data=b"ok\n", filename="summary.txt"),
+            )
+        ],
+    )
+
+    artifacts = materialize_app_run_result(
+        result=result,
+        workflow_volume_name="Workflow-outputs",
+        attempt_dir=run_root / "nodes" / "summary" / "attempts" / "attempt-1",
+        artifact_dir=run_root / "artifacts",
+        producing_node_id="summary",
+        volume_root=tmp_path,
+    )
+
+    assert artifacts[0].storage == VolumePath(
+        volume_name="Workflow-outputs",
+        path=(
+            "demo/run-1/nodes/summary/attempts/attempt-1/"
+            "materialized_outputs/summary-summary"
+        ),
+    )
+
+
 def test_materialize_volume_path_references_existing_remote_output(
     tmp_path: Path,
 ) -> None:

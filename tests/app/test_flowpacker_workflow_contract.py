@@ -16,7 +16,7 @@ def test_flowpacker_workflow_result_wraps_tarball_bytes() -> None:
     assert len(result.outputs) == 1
     output = result.outputs[0]
     assert output.name == "flowpacker_outputs"
-    assert output.kind == ArtifactKind.ARCHIVE
+    assert output.kind == ArtifactKind.STRUCTURES
     assert isinstance(output.storage, InlineBytes)
     assert output.storage.data == b"tarball"
     assert output.storage.filename == "packed.tar.zst"

@@ -37,6 +37,10 @@ materializes each `AppOutput` into one or more `WorkflowArtifact` manifests.
 Inline byte outputs must be written into the workflow run volume before they
 cross a node boundary.
 
+The first workflow runtime is Python-first. Pass a `Workflow` object across the
+orchestrator boundary; serialized workflow dictionaries are intentionally
+deferred until the node and app-function contracts stabilize.
+
 ## Node Execution Policy
 
 Every workflow node checks durable run state before execution and skips work
@@ -123,6 +127,12 @@ download or report outputs, print user messages, and return `None`.
 Workflow reuse happens through workflow-compatible remote app functions. These
 functions may reuse behavior from local entrypoints or existing remote
 functions, but they return `AppRunResult` and avoid local filesystem UX.
+
+App-backed workflow nodes either define `app_name` and `function_name` so the
+runtime can lazily import `modal.Function.from_name(...)`, or override
+`load_app_function()`. They should override `build_app_function_kwargs()` to
+translate `NodeRunContext.inputs` into the app function's primitive or Pydantic
+arguments.
 
 When adding a workflow-compatible app function, keep existing local entrypoint
 behavior unchanged and add a focused pytest contract test that does not call

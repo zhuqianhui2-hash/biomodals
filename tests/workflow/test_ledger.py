@@ -5,9 +5,11 @@
 from pathlib import Path
 
 from biomodals.schema import (
+    AppOutput,
     AppRunResult,
     AppRunStatus,
     ArtifactKind,
+    InlineBytes,
     NodeStatus,
     VolumePath,
     WorkflowArtifact,
@@ -77,3 +79,24 @@ def test_node_is_not_complete_when_artifact_manifest_is_missing(
     ledger.mark_node_succeeded("design", ["missing-artifact"])
 
     assert not ledger.node_is_complete("design")
+
+
+def test_record_app_result_accepts_non_utf8_inline_bytes(tmp_path: Path) -> None:
+    ledger = WorkflowLedger(tmp_path)
+    ledger.create_run(WorkflowRun(workflow_name="demo", run_id="run-1"))
+    result = AppRunResult(
+        status=AppRunStatus.SUCCEEDED,
+        outputs=[
+            AppOutput(
+                name="archive",
+                kind=ArtifactKind.ARCHIVE,
+                storage=InlineBytes(data=b"\xff\x00", filename="archive.tar.zst"),
+            )
+        ],
+    )
+
+    path = ledger.record_app_result("node-1", "attempt-1", result)
+
+    assert path.exists()
+    data = ledger._read_json(path)
+    assert isinstance(data["outputs"][0]["storage"]["data"], str)

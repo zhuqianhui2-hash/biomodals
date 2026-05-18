@@ -42,9 +42,11 @@ class FakeNode(WorkflowNativeNode):
         self.calls = calls
         self.execution_policy = policy
         self.seen_cache_dir: Path | None = None
+        self.seen_inputs = None
 
     def run(self, context):
         self.seen_cache_dir = context.cache_dir
+        self.seen_inputs = context.inputs
         if self.calls is not None:
             self.calls.append(context.node_id)
         return self.result
@@ -173,3 +175,54 @@ def test_resume_policy_receives_durable_cache_path(tmp_path: Path) -> None:
 
     assert node.seen_cache_dir == tmp_path / "demo/run-1/nodes/long/cache"
     assert node.seen_cache_dir.exists()
+
+
+def test_runtime_passes_selected_upstream_artifacts_to_node_context(
+    tmp_path: Path,
+) -> None:
+    workflow = Workflow("demo")
+    upstream = workflow.add_node(ExplodingNode(), id="design")
+    downstream = FakeNode()
+    workflow.add_node(
+        downstream,
+        id="score",
+        inputs={"structures": upstream.outputs(kind=ArtifactKind.STRUCTURES)},
+    )
+    ledger = WorkflowLedger(tmp_path)
+    ledger.create_run(WorkflowRun(workflow_name="demo", run_id="run-1"))
+    ledger.record_artifacts([
+        WorkflowArtifact(
+            artifact_id="design-structures",
+            producing_node_id="design",
+            kind=ArtifactKind.STRUCTURES,
+            storage=VolumePath(
+                volume_name="Workflow-outputs",
+                path="demo/run-1/nodes/design/outputs",
+            ),
+        )
+    ])
+    ledger.mark_node_succeeded("design", ["design-structures"])
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+    )
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.SUCCEEDED
+    assert downstream.seen_inputs == {
+        "structures": [
+            WorkflowArtifact(
+                artifact_id="design-structures",
+                producing_node_id="design",
+                kind=ArtifactKind.STRUCTURES,
+                storage=VolumePath(
+                    volume_name="Workflow-outputs",
+                    path="demo/run-1/nodes/design/outputs",
+                ),
+            )
+        ]
+    }
+    status = runtime.ledger._load_node_status_or_default("score")
+    assert status.input_artifact_ids == ["design-structures"]

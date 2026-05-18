@@ -73,6 +73,7 @@ def _materialize_inline_bytes(
     output_kind: ArtifactKind,
     workflow_volume_name: str,
     attempt_dir: Path,
+    volume_root: Path | None,
     producing_node_id: str,
 ) -> WorkflowArtifact:
     artifact_id = _artifact_id(producing_node_id, output_name)
@@ -95,11 +96,17 @@ def _materialize_inline_bytes(
         kind=output_kind,
         storage=VolumePath(
             volume_name=workflow_volume_name,
-            path=str(materialized_dir),
+            path=_volume_path(materialized_dir, volume_root),
         ),
         files=_artifact_files(materialized_dir),
         source_app_output_name=output_name,
     )
+
+
+def _volume_path(path: Path, volume_root: Path | None) -> str:
+    if volume_root is None:
+        return str(path)
+    return path.relative_to(volume_root).as_posix()
 
 
 def materialize_app_run_result(
@@ -109,6 +116,7 @@ def materialize_app_run_result(
     attempt_dir: Path,
     artifact_dir: Path,
     producing_node_id: str,
+    volume_root: Path | None = None,
 ) -> list[WorkflowArtifact]:
     """Write app outputs into local workflow volume paths and return manifests."""
     artifacts: list[WorkflowArtifact] = []
@@ -121,6 +129,7 @@ def materialize_app_run_result(
                 output_kind=output.kind,
                 workflow_volume_name=workflow_volume_name,
                 attempt_dir=attempt_dir,
+                volume_root=volume_root,
                 producing_node_id=producing_node_id,
             )
         else:

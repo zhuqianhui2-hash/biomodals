@@ -1,11 +1,18 @@
 """Tests for the mocked workflow orchestrator boundary."""
 
-# ruff: noqa: D103
+# ruff: noqa: D101,D102,D103
 
 from pathlib import Path
 
 from biomodals.schema import AppRunResult, AppRunStatus
-from biomodals.workflow import orchestrator_app
+from biomodals.workflow import Workflow, orchestrator_app
+from biomodals.workflow.nodes import WorkflowNativeNode
+from biomodals.workflow.runtime import WorkflowRuntime
+
+
+class SucceedNode(WorkflowNativeNode):
+    def run(self, context):
+        return AppRunResult(status=AppRunStatus.SUCCEEDED)
 
 
 def test_orchestrator_helper_uses_runtime_from_definition(monkeypatch) -> None:
@@ -19,10 +26,12 @@ def test_orchestrator_helper_uses_runtime_from_definition(monkeypatch) -> None:
             workflow_name: str,
             workflow_definition: dict[str, object],
             volume_root: Path,
+            workflow_volume_name: str,
         ):
             calls["workflow_name"] = workflow_name
             calls["workflow_definition"] = workflow_definition
             calls["volume_root"] = volume_root
+            calls["workflow_volume_name"] = workflow_volume_name
             return cls()
 
         def run(self, *, run_id: str, force: bool = False) -> AppRunResult:
@@ -49,6 +58,22 @@ def test_orchestrator_helper_uses_runtime_from_definition(monkeypatch) -> None:
         "workflow_name": "demo",
         "workflow_definition": {"nodes": []},
         "volume_root": Path("/workflow-outputs"),
+        "workflow_volume_name": "WorkflowOrchestrator-outputs",
         "run_id": "run-1",
         "force": True,
     }
+
+
+def test_runtime_from_definition_accepts_python_workflow(tmp_path: Path) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(SucceedNode(), id="ok")
+
+    runtime = WorkflowRuntime.from_definition(
+        workflow_name="demo",
+        workflow_definition=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+    )
+
+    assert runtime.workflow is workflow
+    assert runtime.run(run_id="run-1").status == AppRunStatus.SUCCEEDED

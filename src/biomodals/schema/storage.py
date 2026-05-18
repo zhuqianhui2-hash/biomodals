@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class StorageKind(StrEnum):
@@ -17,6 +17,8 @@ class StorageKind(StrEnum):
 
 class InlineBytes(BaseModel):
     """Bytes returned directly in an app result before workflow materialization."""
+
+    model_config = ConfigDict(ser_json_bytes="base64", val_json_bytes="base64")
 
     kind: Literal[StorageKind.INLINE_BYTES] = StorageKind.INLINE_BYTES
     data: bytes

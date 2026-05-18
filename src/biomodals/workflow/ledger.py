@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+from fnmatch import fnmatch
 from pathlib import Path
 
 from biomodals.schema import (
     AppRunResult,
+    ArtifactSelector,
     AttemptRecord,
+    NodeExecutionPolicy,
+    NodePlacement,
     NodeStatus,
     NodeStatusRecord,
     WorkflowArtifact,
@@ -51,21 +55,32 @@ class WorkflowLedger:
             NodeStatusRecord(node_id=node_id, status=NodeStatus.PENDING)
         )
 
-    def mark_node_running(self, node_id: str, attempt_id: str) -> NodeStatusRecord:
+    def mark_node_running(
+        self,
+        node_id: str,
+        attempt_id: str,
+        *,
+        input_artifact_ids: list[str] | None = None,
+        execution_policy: NodeExecutionPolicy | None = None,
+        placement: NodePlacement | None = None,
+    ) -> NodeStatusRecord:
         """Mark a node as running and record its attempt id."""
         current = self._load_node_status_or_default(node_id)
         attempts = [*current.attempts]
         if attempt_id not in attempts:
             attempts.append(attempt_id)
-        return self._write_node_status(
-            current.model_copy(
-                update={
-                    "status": NodeStatus.RUNNING,
-                    "attempts": attempts,
-                    "error": None,
-                }
-            )
-        )
+        updates = {
+            "status": NodeStatus.RUNNING,
+            "attempts": attempts,
+            "error": None,
+        }
+        if input_artifact_ids is not None:
+            updates["input_artifact_ids"] = input_artifact_ids
+        if execution_policy is not None:
+            updates["execution_policy"] = execution_policy
+        if placement is not None:
+            updates["placement"] = placement
+        return self._write_node_status(current.model_copy(update=updates))
 
     def mark_node_succeeded(
         self, node_id: str, artifact_ids: list[str]
@@ -120,6 +135,26 @@ class WorkflowLedger:
             paths.append(path)
         return paths
 
+    def load_artifact(self, artifact_id: str) -> WorkflowArtifact:
+        """Load one artifact manifest by id."""
+        path = self.run_root / "artifacts" / f"{artifact_id}.json"
+        return WorkflowArtifact.model_validate(self._read_json(path))
+
+    def select_artifacts(self, selector: ArtifactSelector) -> list[WorkflowArtifact]:
+        """Return artifacts matching one upstream selector."""
+        artifact_dir = self.run_root / "artifacts"
+        if not artifact_dir.exists():
+            return []
+        artifacts = [
+            WorkflowArtifact.model_validate(self._read_json(path))
+            for path in sorted(artifact_dir.glob("*.json"))
+        ]
+        return [
+            artifact
+            for artifact in artifacts
+            if self._artifact_matches_selector(artifact, selector)
+        ]
+
     def node_is_complete(self, node_id: str) -> bool:
         """Return whether a node has succeeded and all artifacts are recorded."""
         status_path = self._node_status_path(node_id)
@@ -131,6 +166,26 @@ class WorkflowLedger:
         return all(
             self.run_root.joinpath("artifacts", f"{artifact_id}.json").exists()
             for artifact_id in status.output_artifact_ids
+        )
+
+    @staticmethod
+    def _artifact_matches_selector(
+        artifact: WorkflowArtifact,
+        selector: ArtifactSelector,
+    ) -> bool:
+        if artifact.producing_node_id != selector.producing_node_id:
+            return False
+        if selector.kind is not None and artifact.kind != selector.kind:
+            return False
+        for key, expected in selector.metadata.items():
+            if artifact.metadata.get(key) != expected:
+                return False
+        if selector.pattern is None and selector.role is None:
+            return True
+        return any(
+            (selector.pattern is None or fnmatch(file.path, selector.pattern))
+            and (selector.role is None or file.role == selector.role)
+            for file in artifact.files
         )
 
     def _load_node_status_or_default(self, node_id: str) -> NodeStatusRecord:

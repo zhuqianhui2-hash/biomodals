@@ -22,6 +22,7 @@ CONF = AppConfig(
     timeout=int(os.environ.get("TIMEOUT", str(MAX_TIMEOUT))),
 )
 OUT_VOLUME = CONF.get_out_volume()
+OUT_VOLUME_NAME = f"{CONF.name}-outputs"
 
 runtime_image = patch_image_for_helper(
     modal.Image.debian_slim(python_version=CONF.python_version).env(CONF.default_env)
@@ -32,13 +33,14 @@ app = modal.App(CONF.name, image=runtime_image, tags=CONF.tags)
 def _run_workflow_orchestrator(
     workflow_name: str,
     run_id: str,
-    workflow_definition: dict[str, object],
+    workflow_definition: object,
     force: bool = False,
 ) -> AppRunResult:
     runtime = WorkflowRuntime.from_definition(
         workflow_name=workflow_name,
         workflow_definition=workflow_definition,
         volume_root=Path(CONF.output_volume_mountpoint),
+        workflow_volume_name=OUT_VOLUME_NAME,
     )
     return runtime.run(run_id=run_id, force=force)
 
@@ -52,7 +54,7 @@ def _run_workflow_orchestrator(
 def run_workflow_orchestrator(
     workflow_name: str,
     run_id: str,
-    workflow_definition: dict[str, object],
+    workflow_definition: object,
     force: bool = False,
 ) -> AppRunResult:
     """Run one workflow definition through the workflow runtime."""
