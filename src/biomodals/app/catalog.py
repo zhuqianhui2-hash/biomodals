@@ -26,15 +26,15 @@ class AppNotFoundError(ValueError):
 def get_all_apps(
     use_absolute_paths: bool = False,
     *,
-    app_home: Path = APP_HOME,
     cwd: Path | None = None,
-    suffix: str = "app",
+    suffix: Literal["app", "workflow"] = "app",
 ) -> dict[str, Path]:
     """Retrieve all available biomodals applications."""
     available_apps: dict[str, Path] = {}
     base_cwd = Path.cwd() if cwd is None else cwd
-    glob_pattern = f"*/*_{suffix}.py" if app_home == APP_HOME else f"*_{suffix}.py"
-    for app_file in app_home.glob(glob_pattern):
+    glob_pattern = f"*/*_{suffix}.py" if suffix == "app" else f"*_{suffix}.py"
+    search_root = APP_HOME if suffix == "app" else WORKFLOW_HOME
+    for app_file in search_root.glob(glob_pattern):
         app_path = (
             app_file.resolve()
             if use_absolute_paths
@@ -85,9 +85,7 @@ class BiomodalsApp:
             self._entrypoint = entrypoint_name
 
         # Normalize app name & path
-        self._all_apps = all_apps or get_all_apps(
-            use_absolute_paths=True, app_home=APP_HOME
-        )
+        self._all_apps = all_apps or get_all_apps(use_absolute_paths=True)
         self.name, self.path = self.resolve_app_path(name_or_path)
         self.category = self.path.parent.name
         self.module = self.app_path_to_module_path(self.path)

@@ -63,6 +63,7 @@ def _print_title(title: str) -> None:
 @app.command(name="ls", hidden=True)
 @app.command(name="l", hidden=True)
 def list_available_apps(
+    list_type: Annotated[Literal["app", "workflow"], typer.Argument()] = "app",
     use_absolute_paths: Annotated[
         bool,
         typer.Option("--absolute", "-a", help="Use absolute paths for app locations."),
@@ -96,7 +97,7 @@ def list_available_apps(
     # get_all_apps(app_home=WORKFLOW_HOME, suffix="workflow") and labels rows as
     # workflows instead of applications.
     table_headers = ["App name", "Category", "App path"]
-    available_apps = get_all_apps(use_absolute_paths)
+    available_apps = get_all_apps(use_absolute_paths, suffix=list_type)
     table_rows: list[tuple[str, str, str]] = []
     for app_name, app_path in available_apps.items():
         app_category = app_path.parent.name
