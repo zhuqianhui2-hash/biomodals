@@ -18,6 +18,11 @@ The current example, `src/biomodals/workflow/ppiflow_workflow.py`, proves the ta
 
 The refactor should keep that working behavior as the reference scenario, but extract reusable contracts and scheduling behavior so future workflows can compose any deployed Biomodals app functions.
 
+Execution note: in this feature branch, `ppiflow_workflow.py` was already the
+working behavioral reference before the reusable runtime extraction. The runtime
+work keeps that branch version intact; it does not promote `ppiflow_v2.py` to an
+executable replacement.
+
 ## Vocabulary
 
 Use the terms defined in `CONTEXT.md`.

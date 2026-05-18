@@ -5,6 +5,8 @@
 from pathlib import Path
 from threading import Barrier, BrokenBarrierError
 
+import pytest
+
 from biomodals.schema import (
     AppOutput,
     AppRunResult,
@@ -436,6 +438,45 @@ def test_runtime_records_succeeded_run_status(tmp_path: Path) -> None:
 
     assert result.status == AppRunStatus.SUCCEEDED
     assert runtime.ledger.load_run("demo", "run-1").status == RunStatus.SUCCEEDED
+
+
+def test_runtime_records_dag_hash_and_timestamps(tmp_path: Path) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(FakeNode(), id="one")
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+    )
+    result = runtime.run(run_id="run-1")
+    run = runtime.ledger.load_run("demo", "run-1")
+
+    assert result.status == AppRunStatus.SUCCEEDED
+    assert run.dag_hash
+    assert run.created_at <= run.updated_at
+
+
+def test_runtime_rejects_resume_when_dag_hash_changed(tmp_path: Path) -> None:
+    first_workflow = Workflow("demo")
+    first_workflow.add_node(FakeNode(), id="one")
+    first_runtime = WorkflowRuntime(
+        workflow=first_workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+    )
+    first_runtime.run(run_id="run-1")
+
+    second_workflow = Workflow("demo")
+    second_workflow.add_node(FakeNode(), id="renamed")
+    second_runtime = WorkflowRuntime(
+        workflow=second_workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+    )
+
+    with pytest.raises(ValueError, match="DAG hash"):
+        second_runtime.run(run_id="run-1")
 
 
 def test_runtime_records_failed_run_status(tmp_path: Path) -> None:

@@ -115,6 +115,11 @@ Write JSON through ledger helpers so state files are replaced atomically where
 practical. After volume writes inside Modal containers, call `commit()`. Before
 reading data written by another container, call `reload()`.
 
+`run.json` records the workflow name, run id, status, DAG hash, creation time,
+and update time. Resuming a run with a different DAG hash fails unless the run
+is forced, because stale node state cannot safely be reused across workflow
+definition changes.
+
 ## Modal Preemption
 
 All Modal functions are subject to preemption. Treat remote functions as

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
@@ -57,7 +58,12 @@ class WorkflowLedger:
     def mark_run_status(self, status: RunStatus) -> WorkflowRun:
         """Update the durable status for the active workflow run."""
         run = WorkflowRun.model_validate(self._read_json(self.run_root / "run.json"))
-        updated = run.model_copy(update={"status": status})
+        updated = run.model_copy(
+            update={
+                "status": status,
+                "updated_at": datetime.now(UTC),
+            }
+        )
         self._write_json(self.run_root / "run.json", updated)
         return updated
 

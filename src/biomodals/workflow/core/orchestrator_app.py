@@ -15,6 +15,7 @@ from biomodals.workflow.core.builder import Workflow
 from biomodals.workflow.core.nodes import NodeRunContext, WorkflowNode
 from biomodals.workflow.core.orchestrator import (
     load_workflow_definition,
+    run_remote_node_with_volume,
     run_workflow_definition,
     submit_workflow_run,
 )
@@ -86,10 +87,11 @@ def run_remote_workflow_node(
     context: NodeRunContext,
 ) -> AppRunResult:
     """Run one failure-isolated workflow node in a separate Modal function."""
-    OUT_VOLUME.reload()
-    result = node.run(context)
-    OUT_VOLUME.commit()
-    return result
+    return run_remote_node_with_volume(
+        node=node,
+        context=context,
+        workflow_volume=OUT_VOLUME,
+    )
 
 
 @app.local_entrypoint()

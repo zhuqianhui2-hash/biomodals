@@ -1,6 +1,6 @@
 """Tests for the mocked workflow orchestrator boundary."""
 
-# ruff: noqa: D101,D102,D103
+# ruff: noqa: D101,D102,D103,D107
 
 import sys
 import types
@@ -11,13 +11,30 @@ import pytest
 from biomodals.schema import AppRunResult, AppRunStatus
 from biomodals.workflow import Workflow
 from biomodals.workflow.core import orchestrator
-from biomodals.workflow.core.nodes import WorkflowNativeNode
+from biomodals.workflow.core.nodes import NodeRunContext, WorkflowNativeNode
 from biomodals.workflow.core.runtime import WorkflowRuntime
 
 
 class SucceedNode(WorkflowNativeNode):
     def run(self, context):
         return AppRunResult(status=AppRunStatus.SUCCEEDED)
+
+
+class RaisingNode(WorkflowNativeNode):
+    def run(self, context):
+        raise RuntimeError("remote failed")
+
+
+class FakeVolume:
+    def __init__(self) -> None:
+        self.commit_count = 0
+        self.reload_count = 0
+
+    def commit(self) -> None:
+        self.commit_count += 1
+
+    def reload(self) -> None:
+        self.reload_count += 1
 
 
 def test_orchestrator_helper_uses_runtime_from_definition(monkeypatch) -> None:
@@ -109,6 +126,27 @@ def test_orchestrator_helper_passes_remote_node_runner(monkeypatch) -> None:
 
     assert result.status == AppRunStatus.SUCCEEDED
     assert calls["remote_node_runner"] is remote_runner
+
+
+def test_run_remote_node_with_volume_commits_after_exception(tmp_path: Path) -> None:
+    volume = FakeVolume()
+    context = NodeRunContext(
+        run_id="run-1",
+        node_id="remote",
+        attempt_id="attempt-1",
+        cache_dir=tmp_path / "cache",
+        inputs={},
+    )
+
+    with pytest.raises(RuntimeError, match="remote failed"):
+        orchestrator.run_remote_node_with_volume(
+            node=RaisingNode(),
+            context=context,
+            workflow_volume=volume,
+        )
+
+    assert volume.reload_count == 1
+    assert volume.commit_count == 1
 
 
 def test_submit_workflow_run_waits_for_remote_result() -> None:

@@ -8,6 +8,7 @@ from typing import Any
 
 from biomodals.schema import AppRunResult
 from biomodals.workflow.core.builder import Workflow
+from biomodals.workflow.core.nodes import NodeRunContext, WorkflowNode
 from biomodals.workflow.core.runtime import (
     RemoteNodeRunner,
     WorkflowRuntime,
@@ -36,6 +37,20 @@ def run_workflow_definition(
         remote_node_runner=remote_node_runner,
     )
     return runtime.run(run_id=run_id, force=force)
+
+
+def run_remote_node_with_volume(
+    *,
+    node: WorkflowNode,
+    context: NodeRunContext,
+    workflow_volume: WorkflowVolume,
+) -> AppRunResult:
+    """Run one remote workflow node and commit the volume in a finally block."""
+    workflow_volume.reload()
+    try:
+        return node.run(context)
+    finally:
+        workflow_volume.commit()
 
 
 def load_workflow_definition(factory_ref: str) -> Workflow:

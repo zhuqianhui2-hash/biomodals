@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from biomodals.schema import (
     AppRunResult,
@@ -19,7 +22,7 @@ from biomodals.schema import (
     WorkflowRun,
 )
 from biomodals.workflow.core.artifacts import materialize_app_run_result
-from biomodals.workflow.core.builder import Workflow
+from biomodals.workflow.core.builder import Workflow, WorkflowDefinition
 from biomodals.workflow.core.ledger import WorkflowLedger
 from biomodals.workflow.core.nodes import NodeRunContext, WorkflowNode
 
@@ -91,20 +94,33 @@ class WorkflowRuntime:
     def run(self, *, run_id: str, force: bool = False) -> AppRunResult:
         """Run the workflow until every node succeeds or no progress is possible."""
         definition = self.workflow.validate()
+        dag_hash = self._dag_hash(definition)
         run_path = self.volume_root / definition.name / run_id / "run.json"
         self._reload_volume()
         if run_path.exists() and force:
             self.ledger.reset_run(definition.name, run_id)
             self._commit_volume()
             self.ledger.create_run(
-                WorkflowRun(workflow_name=definition.name, run_id=run_id)
+                WorkflowRun(
+                    workflow_name=definition.name,
+                    run_id=run_id,
+                    dag_hash=dag_hash,
+                )
             )
             self._commit_volume()
         elif run_path.exists():
-            self.ledger.load_run(definition.name, run_id)
+            existing_run = self.ledger.load_run(definition.name, run_id)
+            if existing_run.dag_hash is not None and existing_run.dag_hash != dag_hash:
+                raise ValueError(
+                    "DAG hash does not match existing workflow run; rerun with force"
+                )
         else:
             self.ledger.create_run(
-                WorkflowRun(workflow_name=definition.name, run_id=run_id)
+                WorkflowRun(
+                    workflow_name=definition.name,
+                    run_id=run_id,
+                    dag_hash=dag_hash,
+                )
             )
             self._commit_volume()
         self.ledger.mark_run_status(RunStatus.RUNNING)
@@ -270,6 +286,37 @@ class WorkflowRuntime:
         if result.status == AppRunStatus.PARTIAL:
             return "Node returned partial status"
         return "Node returned failed status"
+
+    @staticmethod
+    def _dag_hash(definition: WorkflowDefinition) -> str:
+        payload = {
+            "name": definition.name,
+            "nodes": {
+                node_id: WorkflowRuntime._node_hash_payload(spec.node)
+                | {
+                    "inputs": {
+                        input_name: selector.model_dump(mode="json")
+                        for input_name, selector in sorted(spec.inputs.items())
+                    },
+                    "control_dependencies": sorted(spec.control_dependencies),
+                    "dependencies": sorted(definition.dependencies[node_id]),
+                }
+                for node_id, spec in sorted(definition.nodes.items())
+            },
+        }
+        encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _node_hash_payload(node: WorkflowNode) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "class": f"{node.__class__.__module__}.{node.__class__.__qualname__}",
+            "execution_policy": node.execution_policy,
+            "placement": node.placement,
+        }
+        if is_dataclass(node):
+            payload["dataclass"] = asdict(cast(Any, node))
+        return payload
 
     def _next_attempt_id(self, node_id: str) -> str:
         attempts_dir = self.ledger.run_root / "nodes" / node_id / "attempts"
