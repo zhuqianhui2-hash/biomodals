@@ -164,9 +164,7 @@ def list_available_apps(
     short: Annotated[
         bool,
         typer.Option(
-            "--short",
-            help="Only show app names without paths or additional info.",
-            is_flag=True,
+            "--short", help="Only show app names without paths or additional info."
         ),
     ] = False,
 ) -> dict[str, Path]:
@@ -211,9 +209,7 @@ def list_available_workflows(
     short: Annotated[
         bool,
         typer.Option(
-            "--short",
-            help="Only show workflow names without paths or additional info.",
-            is_flag=True,
+            "--short", help="Only show workflow names without paths or additional info."
         ),
     ] = False,
 ) -> dict[str, Path]:
