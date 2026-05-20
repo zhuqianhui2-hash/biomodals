@@ -41,3 +41,26 @@ def test_collect_local_inputs_returns_sanitized_keys(tmp_path: Path) -> None:
     staged = _collect_local_inputs({"task": {"input_path": "a/b.pdb"}}, task_path)
 
     assert staged == [("a_b.pdb", b"nested")]
+
+
+def test_collect_local_inputs_stages_steps_yaml_references(
+    tmp_path: Path,
+) -> None:
+    task_path = tmp_path / "task.yaml"
+    task_path.write_text("task: demo\n", encoding="utf-8")
+    steps_dir = tmp_path / "steps"
+    steps_dir.mkdir()
+    steps_path = steps_dir / "steps.yaml"
+    steps_path.write_text("PPIFlowStep: {}\n", encoding="utf-8")
+    steps_dir.joinpath("constraints.csv").write_text(
+        "chain,pos\nA,1\n", encoding="utf-8"
+    )
+
+    staged = _collect_local_inputs(
+        {"task": {"input_path": "input.pdb"}},
+        task_path,
+        {"PPIFlowStep": {"constraint_csv": "constraints.csv"}},
+        steps_path,
+    )
+
+    assert staged == [("constraints.csv", b"chain,pos\nA,1\n")]

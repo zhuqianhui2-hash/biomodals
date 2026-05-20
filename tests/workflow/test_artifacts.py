@@ -237,6 +237,47 @@ def test_materialize_volume_path_can_copy_from_mounted_volume(
     assert artifacts[0].files[0].path == "scores.csv"
 
 
+def test_materialize_volume_path_copy_preserves_empty_directories(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "source-volume"
+    source_dir = source_root / "runs" / "run-1"
+    source_dir.mkdir(parents=True)
+    result = AppRunResult(
+        status=AppRunStatus.SUCCEEDED,
+        outputs=[
+            AppOutput(
+                name="scores",
+                kind=ArtifactKind.SCORES,
+                storage=VolumePath(
+                    volume_name="AF3Score-outputs",
+                    path="runs/run-1",
+                ),
+            )
+        ],
+    )
+
+    artifacts = materialize_app_run_result(
+        result=result,
+        workflow_volume_name="Workflow-outputs",
+        attempt_dir=tmp_path / "workflow" / "attempt",
+        artifact_dir=tmp_path / "workflow" / "artifacts",
+        producing_node_id="score",
+        volume_root=tmp_path / "workflow",
+        volume_path_mode="copy",
+        volume_roots={"AF3Score-outputs": source_root},
+    )
+
+    materialized_dir = (
+        tmp_path / "workflow" / "attempt" / "materialized_outputs" / "score-scores"
+    )
+    assert materialized_dir.is_dir()
+    assert artifacts[0].storage == VolumePath(
+        volume_name="Workflow-outputs",
+        path="attempt/materialized_outputs/score-scores",
+    )
+
+
 def test_materialize_volume_path_copy_rejects_traversal(
     tmp_path: Path,
 ) -> None:

@@ -166,6 +166,7 @@ def _copy_volume_path_tree(
         )
         return
 
+    materialized_dir.mkdir(parents=True, exist_ok=True)
     for child in sorted(source_path.rglob("*")):
         if child.is_symlink():
             raise ValueError("VolumePath copy source tree must not contain symlinks")
