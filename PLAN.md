@@ -447,6 +447,10 @@ tests.
   workflow-compatible app functions into app-backed nodes, implement
   `build_app_function_kwargs(...)`, and replace placeholder native filter/report
   nodes with implementations that emit durable `WorkflowArtifact`s.
+- [ ] **Add archive adapter nodes for structure-producing app archives.** Apps
+  such as FlowPacker keep their app-facing `.tar.zst` archive output contract;
+  workflows should insert adapter nodes that unpack archives and emit selectable
+  structure artifacts before downstream structure consumers.
 - [ ] **Add workflow-compatible scoring outputs.** Decide whether DockQ and
   AF3Score should expose `AppRunResult` workflow functions directly or be called
   through adapter nodes, then add focused contract tests that avoid live Modal
