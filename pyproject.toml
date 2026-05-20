@@ -8,6 +8,7 @@ dependencies = [
     "aiofiles>=25.1.0",
     "modal>=1.2.1",
     "niquests>=3.18.4",
+    "orjson>=3.11.8",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",
     "rich>=14.2.0",
