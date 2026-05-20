@@ -411,12 +411,19 @@ def run_modal_app(
         run_command(["biomodals", "app", "help", str(app.path)], try_rich_print=True)
 
 
-@app.command(
+@app_commands.command(
     name="deploy",
     no_args_is_help=True,
     help="Deploy a biomodals application to Modal (alias: d).",
 )
-@app.command(name="d", no_args_is_help=True, hidden=True)
+@app_commands.command(name="d", no_args_is_help=True, hidden=True)
+@app.command(
+    name="deploy",
+    no_args_is_help=True,
+    help="Deprecated alias for 'biomodals app deploy'.",
+    deprecated=True,
+)
+@app.command(name="d", no_args_is_help=True, hidden=True, deprecated=True)
 def deploy_app(
     app_name_or_path: Annotated[
         str, typer.Argument(help="Name or path of the app to deploy.")

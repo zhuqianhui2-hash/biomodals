@@ -436,7 +436,7 @@ tests.
 
 ### Current Verification Status
 
-- `rtk uv run pytest -q -W error::DeprecationWarning` passes: 96 passed.
+- `rtk uv run pytest -q -W error::DeprecationWarning` passes: 100 passed.
 - `rtk uv run ty check <changed-python-files>` passes for the workflow files and
   tests touched by these fixes.
 - `rtk prek run --files <changed files>` passes.

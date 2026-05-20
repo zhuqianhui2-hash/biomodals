@@ -37,3 +37,17 @@ def test_top_level_list_remains_app_compatibility_alias() -> None:
 
     assert result.exit_code == 0
     assert "rosetta" in result.output
+
+
+def test_app_deploy_command_is_namespaced() -> None:
+    result = runner.invoke(app, ["app", "deploy", "--help"])
+
+    assert result.exit_code == 0
+    assert "Name or path of the app to deploy" in result.output
+
+
+def test_top_level_deploy_remains_app_compatibility_alias() -> None:
+    result = runner.invoke(app, ["deploy", "--help"])
+
+    assert result.exit_code == 0
+    assert "Name or path of the app to deploy" in result.output
