@@ -224,6 +224,15 @@ def _cache_conf_unpaired_msa(conf: AF3Config, msa_cache_dir: Path) -> AF3Config:
     return conf
 
 
+def _af3_sanitised_name(name: str) -> str:
+    """Returns sanitised version of the name that can be used as a filename."""
+    import string
+
+    spaceless_name = name.replace(" ", "_")
+    allowed_chars = set(string.ascii_letters + string.digits + "_-.")
+    return "".join(x for x in spaceless_name if x in allowed_chars)
+
+
 ##########################################
 # Inference functions
 ##########################################
@@ -255,7 +264,7 @@ def run_data_pipeline(json_bytes: bytes, copy_msa_to_ssd: bool = True) -> bytes:
 
     # Check if all protein/RNA sequences have MSA results
     temp_dir: Path = Path(mkdtemp(prefix="alphafold3_data_"))
-    run_name = conf.name
+    run_name = _af3_sanitised_name(conf.name)
     input_json_path = temp_dir / f"{run_name}.json"
     conf.to_files(temp_dir, run_name)
     all_protein_msa_filled = all(
@@ -302,25 +311,26 @@ def run_data_pipeline(json_bytes: bytes, copy_msa_to_ssd: bool = True) -> bytes:
         # if p.returncode != 0:
         #     raise RuntimeError("Failed to extract mmCIF template files")
         msa_db_dir.append(str(db_dir))
-    msa_db_dir.append(str(msa_db_path))  # fallback for mmCIF templates and RNA
+    msa_db_dir.append(APP_INFO.msa_db_dir)  # fallback for mmCIF templates and RNA
 
-    work_dir = temp_dir / run_name
-    work_dir.mkdir(exist_ok=True)
     cmd = [
         sys.executable,
         str(CONF.git_clone_dir / "run_alphafold.py"),
         "--run_inference=false",
         f"--json_path={input_json_path}",
-        f"--output_dir={work_dir}",
+        f"--output_dir={temp_dir}",
         f"--model_dir={CONF.model_dir}",
         *(f"--db_dir={d}" for d in msa_db_dir),
         "--jackhmmer_n_cpu=8",
         "--nhmmer_n_cpu=8",
     ]
-    run_command_with_log(cmd, log_file=work_dir / f"{run_name}.log", verbose=True)
+    run_command(cmd, verbose=True)
 
     # Cache unpaired MSA files in separate directories for future use
-    msa_json_path = work_dir / f"{run_name}_data.json"
+    msa_json_path = temp_dir / run_name / f"{run_name}_data.json"
+    if not msa_json_path.exists():
+        print([x.relative_to(temp_dir) for x in temp_dir.rglob("*")])
+        raise FileNotFoundError(f"MSA JSON file not found: {msa_json_path}")
     _ = _cache_conf_unpaired_msa(AF3Config.from_file(msa_json_path), msa_cache_dir)
     MSA_CACHE_VOLUME.commit()
     return msa_json_path.read_bytes()
@@ -349,8 +359,7 @@ def search_msa_and_templates(
         tmp_path = Path(tmp_dir)
         data_pipeline_futures = []
         for i, msa_chain in msa_chains:
-            input_conf = conf.model_copy(deep=True)
-            input_conf.sequences = [msa_chain]
+            input_conf = conf.model_copy(update={"sequences": [msa_chain]})
             input_conf.to_files(tmp_path, str(i))
             data_pipeline_futures.append(
                 run_data_pipeline.spawn(
