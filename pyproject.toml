@@ -28,3 +28,6 @@ dev = [
     "ipykernel>=7.2.0",
     "pytest>=9.0.3",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]

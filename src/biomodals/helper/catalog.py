@@ -9,8 +9,8 @@ from typing import Literal
 
 import modal
 
-APP_HOME = Path(__file__).parent.resolve()
-BIOMODALS_HOME = APP_HOME.parent
+BIOMODALS_HOME = Path(__file__).parent.parent.resolve()
+APP_HOME = BIOMODALS_HOME / "app"
 WORKFLOW_HOME = BIOMODALS_HOME / "workflow"
 CatalogType = Literal["app", "workflow"]
 
@@ -24,63 +24,27 @@ class AppNotFoundError(ValueError):
         super().__init__(f"Application '{app_name}' not found.")
 
 
-def get_all_apps(
-    use_absolute_paths: bool = False,
+def get_all_scripts(
+    root_dir: Path,
+    glob_prefix: str,
+    glob_suffix: str,
     *,
-    app_home: Path = APP_HOME,
+    use_absolute_paths: bool = False,
     cwd: Path | None = None,
-    suffix: Literal["app", "workflow"] = "app",
 ) -> dict[str, Path]:
     """Retrieve all available biomodals applications."""
     available_apps: dict[str, Path] = {}
     base_cwd = Path.cwd() if cwd is None else cwd
-    glob_pattern = f"*/*_{suffix}.py" if app_home == APP_HOME else f"*_{suffix}.py"
-    for app_file in app_home.glob(glob_pattern):
+    glob_pattern = f"{glob_prefix}*{glob_suffix}.py"
+    for app_file in root_dir.glob(glob_pattern):
         app_path = (
             app_file.resolve()
             if use_absolute_paths
             else app_file.relative_to(base_cwd, walk_up=True)
         )
-        app_name = app_file.stem.removesuffix(f"_{suffix}")
-        if suffix == "workflow":
-            app_name = f"workflow-{app_name}"
+        app_name = app_file.stem.removesuffix(glob_suffix)
         available_apps[app_name] = app_path
     return available_apps
-
-
-def get_app_catalog(
-    use_absolute_paths: bool = False,
-    *,
-    cwd: Path | None = None,
-) -> dict[str, Path]:
-    """Retrieve available Biomodals app scripts."""
-    return get_all_apps(
-        use_absolute_paths=use_absolute_paths,
-        app_home=APP_HOME,
-        cwd=cwd,
-        suffix="app",
-    )
-
-
-def get_workflow_catalog(
-    use_absolute_paths: bool = False,
-    *,
-    cwd: Path | None = None,
-    include_compat_aliases: bool = False,
-) -> dict[str, Path]:
-    """Retrieve available workflow scripts keyed by natural workflow name."""
-    legacy_workflows = get_all_apps(
-        use_absolute_paths=use_absolute_paths,
-        app_home=WORKFLOW_HOME,
-        cwd=cwd,
-        suffix="workflow",
-    )
-    workflows = {
-        name.removeprefix("workflow-"): path for name, path in legacy_workflows.items()
-    }
-    if include_compat_aliases:
-        workflows |= legacy_workflows
-    return workflows
 
 
 def get_catalog(
@@ -88,17 +52,20 @@ def get_catalog(
     *,
     use_absolute_paths: bool = False,
     cwd: Path | None = None,
-    include_compat_aliases: bool = False,
 ) -> dict[str, Path]:
     """Retrieve app or workflow catalog entries."""
     match catalog_type:
         case "app":
-            return get_app_catalog(use_absolute_paths=use_absolute_paths, cwd=cwd)
+            return get_all_scripts(
+                APP_HOME, "*/", "_app", use_absolute_paths=use_absolute_paths, cwd=cwd
+            )
         case "workflow":
-            return get_workflow_catalog(
+            return get_all_scripts(
+                WORKFLOW_HOME,
+                "",
+                "_workflow",
                 use_absolute_paths=use_absolute_paths,
                 cwd=cwd,
-                include_compat_aliases=include_compat_aliases,
             )
         case _:
             raise ValueError(f"Unknown catalog type: {catalog_type}")
@@ -129,6 +96,7 @@ class BiomodalsApp:
         _func_idx (dict[str, int]): A mapping of function names to their index in the functions list.
         _local_entrypoint_idx (list[int]): A list of indices of local entrypoint functions in the functions list.
         _remote_modal_func_idx (list[int]): A list of indices of remote Modal functions in the functions list.
+
     """
 
     def __init__(
@@ -142,7 +110,7 @@ class BiomodalsApp:
             self._entrypoint = entrypoint_name
 
         # Normalize app name & path
-        self._all_apps = all_apps or get_all_apps(use_absolute_paths=True)
+        self._all_apps = all_apps or get_catalog("app", use_absolute_paths=True)
         self.name, self.path = self.resolve_app_path(name_or_path)
         self.category = self.path.parent.name
         self.module = self.app_path_to_module_path(self.path)

@@ -4,21 +4,13 @@
 
 from typer.testing import CliRunner
 
-from biomodals.cli import _catalog_for_list_type, _load_catalog_entry, app
+from biomodals.cli import _load_entry, app
 
 runner = CliRunner()
 
 
-def test_cli_workflow_catalog_uses_natural_workflow_names() -> None:
-    workflows = _catalog_for_list_type("workflow", use_absolute_paths=True)
-
-    assert "ppiflow" in workflows
-    assert "workflow-ppiflow" not in workflows
-    assert workflows["ppiflow"].name == "ppiflow_workflow.py"
-
-
 def test_cli_loads_workflow_namespace_names() -> None:
-    workflow = _load_catalog_entry("workflow", "ppiflow")
+    workflow = _load_entry("workflow", "ppiflow")
 
     assert workflow.module == "biomodals.workflow.ppiflow_workflow"
     assert workflow.category == "workflow"

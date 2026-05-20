@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.table import Table
 
-from biomodals.app.catalog import (
+from biomodals.helper.catalog import (
     AppNotFoundError,
     BiomodalsApp,
     CatalogType,
@@ -36,53 +36,28 @@ def callback():
 
 app.add_typer(app_commands, name="app", help="Discover and run Biomodals apps.")
 app.add_typer(
-    workflow_commands,
-    name="workflow",
-    help="Discover Biomodals workflow entrypoints.",
+    workflow_commands, name="workflow", help="Discover Biomodals workflow entrypoints."
 )
 
 
 ##########################################
-# CLI Commands
+# Helper functions
 ##########################################
-def _catalog_for_list_type(
-    list_type: CatalogType,
-    *,
-    use_absolute_paths: bool,
-) -> dict[str, Path]:
-    """Return the catalog for either app scripts or workflow scripts."""
-    return get_catalog(list_type, use_absolute_paths=use_absolute_paths)
-
-
-def _load_catalog_entry(list_type: CatalogType, name: str) -> BiomodalsApp:
+def _load_entry(entry_type: CatalogType, name: str) -> BiomodalsApp:
     """Load a biomodals app or workflow by name or path."""
     try:
         return BiomodalsApp(
             name,
-            all_apps=get_catalog(
-                list_type,
-                use_absolute_paths=True,
-                include_compat_aliases=list_type == "workflow",
-            ),
+            all_apps=get_catalog(entry_type, use_absolute_paths=True),
         )
     except AppNotFoundError as e:
         console.print(
-            f"[bold red]Error[/bold red] failed to find {list_type} '{name}': {e}"
+            f"[bold red]Error[/bold red] failed to find {entry_type} '{name}': {e}"
         )
         raise typer.Exit(code=1) from e
     except ImportError as e:
         console.print(f"[bold red]Error[/bold red] Failed to import '{name}': {e}")
         raise typer.Exit(code=1) from e
-
-
-def _load_app(name: str) -> BiomodalsApp:
-    """Load a biomodals app by name or path."""
-    return _load_catalog_entry("app", name)
-
-
-def _load_workflow(name: str) -> BiomodalsApp:
-    """Load a biomodals workflow by name or path."""
-    return _load_catalog_entry("workflow", name)
 
 
 def _print_title(title: str) -> None:
@@ -106,21 +81,13 @@ def _list_available_entries(
     short: bool,
 ) -> dict[str, Path]:
     """Show a list of available biomodals apps or workflows."""
-    noun = "application" if list_type == "app" else "workflow"
-    title = "App" if list_type == "app" else "Workflow"
+    title = list_type.capitalize()
     table_headers = [f"{title} name", "Category", f"{title} path"]
-    available_apps = _catalog_for_list_type(
-        list_type,
-        use_absolute_paths=use_absolute_paths,
-    )
+    available_apps = get_catalog(list_type, use_absolute_paths=use_absolute_paths)
     table_rows: list[tuple[str, str, str]] = []
     for app_name, app_path in available_apps.items():
         app_category = app_path.parent.name
-        table_rows.append((
-            f"[green]{app_name}[/green]",
-            app_category,
-            str(app_path),
-        ))
+        table_rows.append((f"[green]{app_name}[/green]", app_category, str(app_path)))
     match sort_by:
         case "name":
             sort_by_idx = 0
@@ -158,7 +125,7 @@ def _list_available_entries(
             "\n:dna: To see help for a workflow, use:\n"
             "     [bold]biomodals workflow help <[green]workflow-name-or-path[/green]>[/bold]"
         )
-    console.print(f"\n:dna: [bold]Available biomodals {noun}s:[/bold]")
+    console.print(f"\n:dna: [bold]Available biomodals {list_type}s:[/bold]")
     console.print(table)
     return available_apps
 
@@ -170,9 +137,7 @@ def _list_available_entries(
 @app_commands.command(name="ls", hidden=True)
 @app_commands.command(name="l", hidden=True)
 @app.command(
-    name="list",
-    help="Deprecated alias for 'biomodals app list'.",
-    deprecated=True,
+    name="list", help="Deprecated alias for 'biomodals app list'.", deprecated=True
 )
 @app.command(name="ls", hidden=True, deprecated=True)
 @app.command(name="l", hidden=True, deprecated=True)
@@ -262,22 +227,16 @@ def list_available_workflows(
     )
 
 
-def _show_entry_help(
-    list_type: CatalogType,
-    entry_name: str,
-    *,
-    verbose: bool,
-) -> None:
+def _show_entry_help(list_type: CatalogType, entry_name: str, *, verbose: bool) -> None:
     """Show help for a specific biomodals app or workflow."""
-    noun = "application" if list_type == "app" else "workflow"
-    catalog_entry = _load_catalog_entry(list_type, entry_name)
+    catalog_entry = _load_entry(list_type, entry_name)
     if catalog_entry._entrypoint is not None:
         # When an entrypoint name is specified, show only its docstring
         f = catalog_entry[catalog_entry._entrypoint]
         console.print(
             f"[bold]Help for {f.func_type} function"
             f"'[green]{f.name}[/green]'"
-            f" in {noun} '[green]{catalog_entry.name}[/green]'"
+            f" in {list_type} '[green]{catalog_entry.name}[/green]'"
             f" ({catalog_entry.category}):[/bold]\n"
         )
         console.print(f.docstring or "No documentation available.")
@@ -288,7 +247,7 @@ def _show_entry_help(
 
     # When no entrypoint is specified, show the app help
     console.print(
-        f"[bold]Help for {noun}"
+        f"[bold]Help for {list_type}"
         f" '[green]{catalog_entry.name}[/green]'"
         f" ({catalog_entry.category}):[/bold]"
     )
@@ -300,7 +259,7 @@ def _show_entry_help(
             catalog_entry[x] for x in catalog_entry._remote_modal_func_idx
         ]
 
-        _print_title(f"Remote Modal functions in this {noun}")
+        _print_title(f"Remote Modal functions in this {list_type}")
         remote_func_names = ", ".join([x.name for x in remote_modal_functions])
         console.print(f"[green]{remote_func_names}[/green]\n")
         if verbose:
@@ -310,7 +269,7 @@ def _show_entry_help(
                     console.print(Markdown(f.docstring))
 
     if f_indices := catalog_entry._local_entrypoint_idx:
-        _print_title(f"Local entrypoint(s) in this {noun}")
+        _print_title(f"Local entrypoint(s) in this {list_type}")
         for f_idx in f_indices:
             f = catalog_entry[f_idx]
 
@@ -422,7 +381,7 @@ def run_modal_app(
     # so workflow-* names can stage workflow inputs before invoking orchestrators.
     import sys
 
-    app = _load_app(app_name_or_path)
+    app = _load_entry("app", app_name_or_path)
 
     full_app = (
         str(app.path) if app._entrypoint is None else f"{app.path}::{app._entrypoint}"
@@ -475,7 +434,7 @@ def deploy_app(
     ] = None,
 ):
     """Deploy a biomodals application to Modal."""
-    app = _load_app(app_name_or_path)
+    app = _load_entry("app", app_name_or_path)
     cmd = ["modal", "deploy"]
     if name:
         cmd.extend(["--name", name])
