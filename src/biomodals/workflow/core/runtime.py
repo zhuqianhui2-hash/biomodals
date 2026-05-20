@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
+
+import orjson
 
 from biomodals.schema import (
     AppRunResult,
@@ -17,6 +18,7 @@ from biomodals.schema import (
     AttemptRecord,
     NodeExecutionPolicy,
     NodePlacement,
+    NodeStatus,
     RunStatus,
     WorkflowArtifact,
     WorkflowRun,
@@ -26,7 +28,20 @@ from biomodals.workflow.core.builder import Workflow, WorkflowDefinition
 from biomodals.workflow.core.ledger import WorkflowLedger
 from biomodals.workflow.core.nodes import NodeRunContext, WorkflowNode
 
-RemoteNodeRunner = Callable[[WorkflowNode, NodeRunContext], AppRunResult]
+
+class RemoteFunctionCall(Protocol):
+    """Minimal Modal FunctionCall boundary used by remote workflow nodes."""
+
+    object_id: str
+
+    def get(self, timeout: float | int | None = None) -> object:
+        """Return the remote function result or raise TimeoutError."""
+
+
+RemoteNodeRunner = Callable[
+    [WorkflowNode, NodeRunContext], AppRunResult | RemoteFunctionCall
+]
+FunctionCallResolver = Callable[[str], RemoteFunctionCall]
 
 
 class WorkflowVolume(Protocol):
@@ -50,6 +65,9 @@ class WorkflowRuntime:
         workflow_volume_name: str,
         workflow_volume: WorkflowVolume | None = None,
         remote_node_runner: RemoteNodeRunner | None = None,
+        function_call_resolver: FunctionCallResolver | None = None,
+        remote_call_poll_timeout: float | int = 0,
+        max_ready_workers: int = 32,
     ):
         """Initialize a runtime for one workflow and ledger root."""
         self.workflow = workflow
@@ -57,6 +75,9 @@ class WorkflowRuntime:
         self.workflow_volume_name = workflow_volume_name
         self.workflow_volume = workflow_volume
         self.remote_node_runner = remote_node_runner
+        self.function_call_resolver = function_call_resolver
+        self.remote_call_poll_timeout = remote_call_poll_timeout
+        self.max_ready_workers = max_ready_workers
         self.ledger = WorkflowLedger(self.volume_root)
         self.executed_waves: list[list[str]] = []
 
@@ -70,6 +91,7 @@ class WorkflowRuntime:
         workflow_volume_name: str | None = None,
         workflow_volume: WorkflowVolume | None = None,
         remote_node_runner: RemoteNodeRunner | None = None,
+        function_call_resolver: FunctionCallResolver | None = None,
     ) -> WorkflowRuntime:
         """Create a runtime from a Python workflow definition."""
         if isinstance(workflow_definition, Workflow):
@@ -85,6 +107,7 @@ class WorkflowRuntime:
                 ),
                 workflow_volume=workflow_volume,
                 remote_node_runner=remote_node_runner,
+                function_call_resolver=function_call_resolver,
             )
         raise NotImplementedError(
             "Serialized workflow definition dictionaries are deferred; pass a "
@@ -95,9 +118,9 @@ class WorkflowRuntime:
         """Run the workflow until every node succeeds or no progress is possible."""
         definition = self.workflow.validate()
         dag_hash = self._dag_hash(definition)
-        run_path = self.volume_root / definition.name / run_id / "run.json"
         self._reload_volume()
-        if run_path.exists() and force:
+        run_exists = self.ledger.run_exists(definition.name, run_id)
+        if run_exists and force:
             self.ledger.reset_run(definition.name, run_id)
             self._commit_volume()
             self.ledger.create_run(
@@ -108,7 +131,7 @@ class WorkflowRuntime:
                 )
             )
             self._commit_volume()
-        elif run_path.exists():
+        elif run_exists:
             existing_run = self.ledger.load_run(definition.name, run_id)
             if existing_run.dag_hash is not None and existing_run.dag_hash != dag_hash:
                 raise ValueError(
@@ -138,9 +161,25 @@ class WorkflowRuntime:
                 for node_id, dependencies in definition.dependencies.items()
                 if node_id not in completed
                 and dependencies.issubset(completed)
-                and not self.ledger.node_is_complete(node_id)
+                and self._node_can_make_progress(node_id)
             ]
             if not ready:
+                running = [
+                    node_id
+                    for node_id, dependencies in definition.dependencies.items()
+                    if node_id not in completed
+                    and dependencies.issubset(completed)
+                    and self.ledger.node_is_running(node_id)
+                ]
+                if running:
+                    self._commit_volume()
+                    return AppRunResult(
+                        status=AppRunStatus.PARTIAL,
+                        warnings=[
+                            "Workflow has in-flight nodes without a recoverable "
+                            f"remote call: {', '.join(sorted(running))}"
+                        ],
+                    )
                 self.ledger.mark_run_status(RunStatus.FAILED)
                 self._commit_volume()
                 return AppRunResult(
@@ -165,9 +204,23 @@ class WorkflowRuntime:
             node_id for node_id in node_ids if self.ledger.node_is_complete(node_id)
         }
 
+    def _node_can_make_progress(self, node_id: str) -> bool:
+        if self.ledger.node_is_complete(node_id):
+            return False
+        if not self.ledger.node_is_running(node_id):
+            return True
+        return (
+            self.ledger.latest_remote_call(
+                node_id,
+                statuses=("submitted", "running", "succeeded"),
+            )
+            is not None
+        )
+
     def _run_ready_nodes(self, node_ids: list[str]) -> list[tuple[str, AppRunResult]]:
         results: list[tuple[str, AppRunResult]] = []
-        with ThreadPoolExecutor(max_workers=len(node_ids)) as executor:
+        max_workers = min(len(node_ids), max(1, self.max_ready_workers))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(self._run_node, node_id): node_id
                 for node_id in node_ids
@@ -191,6 +244,9 @@ class WorkflowRuntime:
     def _run_node(self, node_id: str) -> AppRunResult:
         definition = self.workflow.validate()
         spec = definition.nodes[node_id]
+        recovered = self._recover_remote_node_if_possible(node_id)
+        if recovered is not None:
+            return recovered
         if (
             spec.node.execution_policy == NodeExecutionPolicy.RERUN
             and self.ledger.node_has_state(node_id)
@@ -212,6 +268,7 @@ class WorkflowRuntime:
             execution_policy=spec.node.execution_policy,
             placement=spec.node.placement,
         )
+        self.ledger.record_node_inputs(node_id, inputs)
         attempt = self.ledger.record_attempt_started(node_id, attempt_id)
         attempt_dir = self._attempt_dir(attempt)
         cache_dir = self.ledger.run_root / "nodes" / node_id / "cache"
@@ -228,6 +285,21 @@ class WorkflowRuntime:
                 inputs=inputs,
             ),
         )
+        return self._finalize_node_result(
+            node_id=node_id,
+            attempt_id=attempt_id,
+            attempt_dir=attempt_dir,
+            result=result,
+        )
+
+    def _finalize_node_result(
+        self,
+        *,
+        node_id: str,
+        attempt_id: str,
+        attempt_dir: Path,
+        result: AppRunResult,
+    ) -> AppRunResult:
         self.ledger.record_app_result(node_id, attempt_id, result)
         if result.status in {AppRunStatus.FAILED, AppRunStatus.PARTIAL}:
             if result.logs:
@@ -240,6 +312,13 @@ class WorkflowRuntime:
                     volume_root=self.volume_root,
                 )
                 self.ledger.record_artifacts(log_artifacts)
+            self.ledger.record_attempt_completed(
+                node_id,
+                attempt_id,
+                NodeStatus.FAILED,
+                result=result,
+                error=self._node_error_message(result),
+            )
             self._commit_volume()
             return result
 
@@ -255,6 +334,12 @@ class WorkflowRuntime:
         self.ledger.mark_node_succeeded(
             node_id,
             [artifact.artifact_id for artifact in artifacts],
+        )
+        self.ledger.record_attempt_completed(
+            node_id,
+            attempt_id,
+            NodeStatus.SUCCEEDED,
+            result=result,
         )
         self._commit_volume()
         return result
@@ -276,8 +361,164 @@ class WorkflowRuntime:
             node.placement == NodePlacement.REMOTE
             and self.remote_node_runner is not None
         ):
-            return self.remote_node_runner(node, context)
+            return self._run_remote_node(node, context)
         return node.run(context)
+
+    def _run_remote_node(
+        self,
+        node: WorkflowNode,
+        context: NodeRunContext,
+    ) -> AppRunResult:
+        if self.remote_node_runner is None:
+            return node.run(context)
+
+        remote_result = self.remote_node_runner(node, context)
+        if isinstance(remote_result, AppRunResult):
+            self._reload_volume()
+            return remote_result
+
+        call_id = str(remote_result.object_id)
+        self.ledger.record_remote_call(
+            call_id=call_id,
+            node_id=context.node_id,
+            attempt_id=context.attempt_id,
+            function_name=self._remote_function_name(node),
+            call_kind="node",
+        )
+        self._commit_volume()
+        result = self._collect_remote_call(call_id, remote_result)
+        self._reload_volume()
+        return result
+
+    def _recover_remote_node_if_possible(self, node_id: str) -> AppRunResult | None:
+        succeeded_call = self.ledger.latest_remote_call(
+            node_id,
+            statuses=("succeeded",),
+        )
+        if succeeded_call is not None:
+            result = self.ledger.load_attempt_app_result(
+                node_id,
+                str(succeeded_call["attempt_id"]),
+            )
+            if result is not None:
+                self._reload_volume()
+                return self._finalize_node_result(
+                    node_id=node_id,
+                    attempt_id=str(succeeded_call["attempt_id"]),
+                    attempt_dir=self.ledger.run_root
+                    / "nodes"
+                    / node_id
+                    / "attempts"
+                    / str(succeeded_call["attempt_id"]),
+                    result=result,
+                )
+
+        remote_call = self.ledger.latest_remote_call(
+            node_id,
+            statuses=("submitted", "running"),
+        )
+        if remote_call is None:
+            return None
+        call_id = str(remote_call["call_id"])
+        try:
+            function_call = self._resolve_function_call(call_id)
+            result = self._collect_remote_call(call_id, function_call)
+        except _RemoteCallExpired:
+            return None
+        self._reload_volume()
+        return self._finalize_node_result(
+            node_id=node_id,
+            attempt_id=str(remote_call["attempt_id"]),
+            attempt_dir=self.ledger.run_root
+            / "nodes"
+            / node_id
+            / "attempts"
+            / str(remote_call["attempt_id"]),
+            result=result,
+        )
+
+    def _collect_remote_call(
+        self,
+        call_id: str,
+        function_call: RemoteFunctionCall,
+    ) -> AppRunResult:
+        try:
+            try:
+                raw_result = function_call.get(timeout=self.remote_call_poll_timeout)
+            except TimeoutError:
+                self.ledger.mark_remote_call_status(call_id, "running")
+                self._commit_volume()
+                raw_result = function_call.get()
+        except Exception as exc:
+            self._record_remote_call_exception(call_id, exc)
+            raise
+
+        try:
+            result = AppRunResult.model_validate(raw_result)
+        except Exception as exc:
+            self.ledger.mark_remote_call_status(
+                call_id,
+                "failed",
+                error=str(exc),
+                completed=True,
+            )
+            self._commit_volume()
+            raise
+
+        remote_call = self.ledger.load_remote_call(call_id)
+        if remote_call is not None:
+            self.ledger.record_app_result(
+                str(remote_call["node_id"]),
+                str(remote_call["attempt_id"]),
+                result,
+            )
+            self._commit_volume()
+        self.ledger.mark_remote_call_status(
+            call_id,
+            "succeeded",
+            completed=True,
+            metadata={"result_status": result.status.value},
+        )
+        self._commit_volume()
+        return result
+
+    def _record_remote_call_exception(self, call_id: str, exc: Exception) -> None:
+        if exc.__class__.__name__ == "OutputExpiredError":
+            self.ledger.mark_remote_call_status(
+                call_id,
+                "expired",
+                error=str(exc),
+                completed=True,
+            )
+            self._commit_volume()
+            raise _RemoteCallExpired(str(exc)) from exc
+        self.ledger.mark_remote_call_status(
+            call_id,
+            "failed",
+            error=str(exc),
+            completed=True,
+        )
+        self._commit_volume()
+
+    def _resolve_function_call(self, call_id: str) -> RemoteFunctionCall:
+        if self.function_call_resolver is not None:
+            return self.function_call_resolver(call_id)
+
+        import modal
+
+        return modal.FunctionCall.from_id(call_id)
+
+    def _remote_function_name(self, node: WorkflowNode) -> str:
+        if self.remote_node_runner is not None:
+            function_name = getattr(self.remote_node_runner, "function_name", None)
+            if function_name is not None:
+                return str(function_name)
+        node_name = f"{node.__class__.__module__}.{node.__class__.__qualname__}"
+        app_name = getattr(node, "app_name", None)
+        app_function = getattr(node, "function_name", None)
+        if app_name is not None and app_function is not None:
+            return f"{app_name}.{app_function}"
+        return node_name
 
     @staticmethod
     def _node_error_message(result: AppRunResult) -> str:
@@ -304,7 +545,11 @@ class WorkflowRuntime:
                 for node_id, spec in sorted(definition.nodes.items())
             },
         }
-        encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        encoded = orjson.dumps(
+            payload,
+            option=orjson.OPT_SORT_KEYS,
+            default=str,
+        )
         return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
@@ -319,11 +564,7 @@ class WorkflowRuntime:
         return payload
 
     def _next_attempt_id(self, node_id: str) -> str:
-        attempts_dir = self.ledger.run_root / "nodes" / node_id / "attempts"
-        if not attempts_dir.exists():
-            return "attempt-1"
-        attempts = sorted(path.name for path in attempts_dir.iterdir() if path.is_dir())
-        return f"attempt-{len(attempts) + 1}"
+        return self.ledger.next_attempt_id(node_id)
 
     def _attempt_dir(self, attempt: AttemptRecord) -> Path:
         return (
@@ -341,3 +582,7 @@ class WorkflowRuntime:
     def _reload_volume(self) -> None:
         if self.workflow_volume is not None:
             self.workflow_volume.reload()
+
+
+class _RemoteCallExpired(RuntimeError):
+    """Raised when Modal no longer has a recoverable function result."""

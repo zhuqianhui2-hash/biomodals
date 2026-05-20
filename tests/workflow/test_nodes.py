@@ -2,6 +2,11 @@
 
 # ruff: noqa: D101,D102,D103,D107
 
+from typing import get_type_hints
+
+import modal
+import pytest
+
 from biomodals.schema import AppRunResult, AppRunStatus
 from biomodals.workflow.core.nodes import AppBackedNode, NodeRunContext
 
@@ -29,6 +34,14 @@ class FakeAppNode(AppBackedNode):
         return {"run_name": context.run_id, "node_id": context.node_id}
 
 
+def test_app_backed_node_modal_function_annotations() -> None:
+    load_hints = get_type_hints(AppBackedNode.load_app_function)
+    invoke_hints = get_type_hints(AppBackedNode.invoke_app_function)
+
+    assert load_hints["return"] is modal.Function
+    assert invoke_hints["app_function"] is modal.Function
+
+
 def test_app_backed_node_invokes_loaded_modal_function(tmp_path) -> None:
     remote_function = FakeRemoteFunction()
     node = FakeAppNode(remote_function)
@@ -45,3 +58,13 @@ def test_app_backed_node_invokes_loaded_modal_function(tmp_path) -> None:
 
     assert result.status == AppRunStatus.SUCCEEDED
     assert remote_function.calls == [{"run_name": "run-1", "node_id": "pack"}]
+
+
+def test_app_backed_node_rejects_plain_python_callable() -> None:
+    node = AppBackedNode()
+
+    def ordinary_function(**kwargs):
+        return kwargs
+
+    with pytest.raises(TypeError, match="Modal function"):
+        node.invoke_app_function(ordinary_function, {"run_name": "run-1"})

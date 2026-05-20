@@ -2,7 +2,10 @@
 
 # ruff: noqa: D103
 
+import pytest
+
 from biomodals.workflow.core.workers import (
+    WorkerCall,
     WorkerTask,
     WorkerTaskResult,
     bounded_worker_count,
@@ -84,10 +87,14 @@ def test_create_worker_queue_uses_injected_queue_factory() -> None:
 def test_spawn_worker_pool_spawns_fixed_count_workers() -> None:
     calls = []
 
+    class FakeFunctionCall:
+        def __init__(self, object_id):
+            self.object_id = object_id
+
     class FakeWorkerFunction:
         def spawn(self, queue, **kwargs):
             calls.append((queue, kwargs))
-            return f"call-{len(calls)}"
+            return FakeFunctionCall(f"call-{len(calls)}")
 
     spawned = spawn_worker_pool(
         FakeWorkerFunction(),
@@ -96,7 +103,23 @@ def test_spawn_worker_pool_spawns_fixed_count_workers() -> None:
         node_id="score",
     )
 
-    assert spawned == ["call-1", "call-2", "call-3"]
+    assert spawned == [
+        WorkerCall(
+            worker_index=0,
+            function_call=spawned[0].function_call,
+            call_id="call-1",
+        ),
+        WorkerCall(
+            worker_index=1,
+            function_call=spawned[1].function_call,
+            call_id="call-2",
+        ),
+        WorkerCall(
+            worker_index=2,
+            function_call=spawned[2].function_call,
+            call_id="call-3",
+        ),
+    ]
     assert calls == [
         ("queue", {"node_id": "score"}),
         ("queue", {"node_id": "score"}),
@@ -104,11 +127,23 @@ def test_spawn_worker_pool_spawns_fixed_count_workers() -> None:
     ]
 
 
+def test_spawn_worker_pool_requires_modal_call_ids() -> None:
+    class FakeWorkerFunction:
+        def spawn(self, queue, **kwargs):
+            return object()
+
+    with pytest.raises(ValueError, match="object_id"):
+        spawn_worker_pool(FakeWorkerFunction(), queue="queue", worker_count=1)
+
+
 def test_gather_worker_pool_results_uses_injected_gather() -> None:
-    calls = ["call-1", "call-2"]
+    calls = [
+        WorkerCall(worker_index=0, function_call="call-1", call_id="call-id-1"),
+        WorkerCall(worker_index=1, function_call="call-2", call_id="call-id-2"),
+    ]
 
     def fake_gather(*function_calls):
-        assert function_calls == tuple(calls)
+        assert function_calls == ("call-1", "call-2")
         return [
             WorkerTaskResult(task_id="task-1", succeeded=True),
             WorkerTaskResult(task_id="task-2", succeeded=True),

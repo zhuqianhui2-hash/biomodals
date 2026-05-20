@@ -27,6 +27,15 @@ class WorkerTaskResult:
 
 
 @dataclass(frozen=True)
+class WorkerCall:
+    """Spawned worker call plus the Modal call id to record before waiting."""
+
+    worker_index: int
+    function_call: Any
+    call_id: str
+
+
+@dataclass(frozen=True)
 class WorkerPoolSummary:
     """Aggregated completion state for one worker pool."""
 
@@ -97,20 +106,33 @@ def spawn_worker_pool(
     queue: Any,
     worker_count: int,
     **worker_kwargs: Any,
-) -> list[Any]:
+) -> list[WorkerCall]:
     """Spawn a fixed-size worker pool against one queue."""
     if worker_count < 1:
         return []
-    return [worker_function.spawn(queue, **worker_kwargs) for _ in range(worker_count)]
+    calls: list[WorkerCall] = []
+    for worker_index in range(worker_count):
+        function_call = worker_function.spawn(queue, **worker_kwargs)
+        call_id = getattr(function_call, "object_id", None)
+        if not call_id:
+            raise ValueError("Spawned worker FunctionCall must expose object_id")
+        calls.append(
+            WorkerCall(
+                worker_index=worker_index,
+                function_call=function_call,
+                call_id=call_id,
+            )
+        )
+    return calls
 
 
 def gather_worker_pool_results(
-    function_calls: Iterable[Any],
+    function_calls: Iterable[WorkerCall | Any],
     *,
     gather: Callable[..., Iterable[WorkerTaskResult | dict[str, Any]]] | None = None,
 ) -> list[WorkerTaskResult]:
     """Gather Modal worker calls and normalize their task results."""
-    calls = list(function_calls)
+    calls = [_unwrap_worker_call(call) for call in function_calls]
     if not calls:
         return []
     if gather is None:
@@ -118,6 +140,12 @@ def gather_worker_pool_results(
 
         gather = modal.FunctionCall.gather
     return [_coerce_worker_task_result(result) for result in gather(*calls)]
+
+
+def _unwrap_worker_call(call: WorkerCall | Any) -> Any:
+    if isinstance(call, WorkerCall):
+        return call.function_call
+    return call
 
 
 def _coerce_worker_task_result(

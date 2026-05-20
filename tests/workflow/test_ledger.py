@@ -1,14 +1,17 @@
-"""Tests for the filesystem-backed workflow ledger."""
+"""Tests for the SQLite-backed workflow ledger."""
 
 # ruff: noqa: D103
 
+import sqlite3
 from pathlib import Path
-from typing import Any, cast
+
+import orjson
 
 from biomodals.schema import (
     AppOutput,
     AppRunResult,
     AppRunStatus,
+    ArtifactFile,
     ArtifactKind,
     InlineBytes,
     NodeStatus,
@@ -17,10 +20,18 @@ from biomodals.schema import (
     WorkflowArtifact,
     WorkflowRun,
 )
-from biomodals.workflow.core.ledger import WorkflowLedger
+from biomodals.workflow.core.ledger import LEDGER_TABLES, WorkflowLedger
 
 
-def test_create_run_writes_and_loads_run_json(tmp_path: Path) -> None:
+def _connect(tmp_path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(tmp_path / "ppiflow" / "run-1" / "ledger.sqlite3")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def test_create_run_initializes_sqlite_ledger_and_documented_tables(
+    tmp_path: Path,
+) -> None:
     ledger = WorkflowLedger(tmp_path)
     run = WorkflowRun(
         workflow_name="ppiflow",
@@ -33,10 +44,25 @@ def test_create_run_writes_and_loads_run_json(tmp_path: Path) -> None:
 
     assert created == run
     assert loaded == run
-    assert tmp_path.joinpath("ppiflow", "run-1", "run.json").exists()
+    assert tmp_path.joinpath("ppiflow", "run-1", "ledger.sqlite3").exists()
+
+    with _connect(tmp_path) as conn:
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        run_row = conn.execute("SELECT * FROM runs WHERE run_id = ?", ("run-1",))
+        row = run_row.fetchone()
+
+    assert set(LEDGER_TABLES).issubset(tables)
+    assert row["workflow_name"] == "ppiflow"
+    assert row["dag_hash"] == "abc123"
+    assert row["status"] == RunStatus.PENDING
 
 
-def test_mark_run_status_updates_run_json(tmp_path: Path) -> None:
+def test_mark_run_status_updates_run_row(tmp_path: Path) -> None:
     ledger = WorkflowLedger(tmp_path)
     ledger.create_run(WorkflowRun(workflow_name="ppiflow", run_id="run-1"))
 
@@ -45,9 +71,12 @@ def test_mark_run_status_updates_run_json(tmp_path: Path) -> None:
 
     assert updated.status == RunStatus.RUNNING
     assert loaded.status == RunStatus.RUNNING
+    with _connect(tmp_path) as conn:
+        row = conn.execute("SELECT status FROM runs WHERE run_id = 'run-1'").fetchone()
+    assert row["status"] == RunStatus.RUNNING
 
 
-def test_node_status_attempt_app_result_and_artifacts_are_recorded(
+def test_node_attempt_app_result_and_artifacts_are_debuggable_with_sql(
     tmp_path: Path,
 ) -> None:
     ledger = WorkflowLedger(tmp_path)
@@ -55,7 +84,7 @@ def test_node_status_attempt_app_result_and_artifacts_are_recorded(
 
     status = ledger.mark_node_running("design", "attempt-1")
     attempt = ledger.record_attempt_started("design", "attempt-1")
-    result_path = ledger.record_app_result(
+    ledger.record_app_result(
         "design",
         "attempt-1",
         AppRunResult(status=AppRunStatus.SUCCEEDED),
@@ -68,24 +97,50 @@ def test_node_status_attempt_app_result_and_artifacts_are_recorded(
             volume_name="Workflow-outputs",
             path="ppiflow/run-1/artifacts/artifact-1",
         ),
+        files=[
+            ArtifactFile(
+                path="model.pdb",
+                role="structure",
+                media_type="chemical/x-pdb",
+                size_bytes=12,
+            )
+        ],
     )
-    artifact_paths = ledger.record_artifacts([artifact])
+    ledger.record_artifacts([artifact])
     succeeded = ledger.mark_node_succeeded("design", ["artifact-1"])
 
     assert status.status == NodeStatus.RUNNING
     assert attempt.attempt_id == "attempt-1"
-    assert (
-        result_path
-        == tmp_path / "ppiflow/run-1/nodes/design/attempts/attempt-1/app_result.json"
-    )
-    assert artifact_paths == [tmp_path / "ppiflow/run-1/artifacts/artifact-1.json"]
     assert succeeded.status == NodeStatus.SUCCEEDED
     assert ledger.node_is_complete("design")
 
+    with _connect(tmp_path) as conn:
+        node = conn.execute("SELECT * FROM nodes WHERE node_id = 'design'").fetchone()
+        attempt_row = conn.execute(
+            "SELECT * FROM attempts WHERE node_id = 'design'"
+        ).fetchone()
+        artifact_row = conn.execute(
+            "SELECT * FROM artifacts WHERE artifact_id = 'artifact-1'"
+        ).fetchone()
+        file_row = conn.execute(
+            "SELECT * FROM artifact_files WHERE artifact_id = 'artifact-1'"
+        ).fetchone()
+        output_row = conn.execute(
+            "SELECT * FROM node_outputs WHERE node_id = 'design'"
+        ).fetchone()
 
-def test_node_is_not_complete_when_artifact_manifest_is_missing(
-    tmp_path: Path,
-) -> None:
+    assert node["status"] == NodeStatus.SUCCEEDED
+    assert node["current_attempt_id"] == "attempt-1"
+    assert (
+        attempt_row["app_result_json"]
+        == AppRunResult(status=AppRunStatus.SUCCEEDED).model_dump_json()
+    )
+    assert artifact_row["storage_path"] == "ppiflow/run-1/artifacts/artifact-1"
+    assert file_row["path"] == "model.pdb"
+    assert output_row["artifact_id"] == "artifact-1"
+
+
+def test_node_is_not_complete_when_artifact_row_is_missing(tmp_path: Path) -> None:
     ledger = WorkflowLedger(tmp_path)
     ledger.create_run(WorkflowRun(workflow_name="ppiflow", run_id="run-1"))
     ledger.mark_node_running("design", "attempt-1")
@@ -94,22 +149,59 @@ def test_node_is_not_complete_when_artifact_manifest_is_missing(
     assert not ledger.node_is_complete("design")
 
 
-def test_record_app_result_accepts_non_utf8_inline_bytes(tmp_path: Path) -> None:
+def test_record_app_result_stores_pydantic_inline_bytes_json(tmp_path: Path) -> None:
     ledger = WorkflowLedger(tmp_path)
-    ledger.create_run(WorkflowRun(workflow_name="demo", run_id="run-1"))
+    ledger.create_run(WorkflowRun(workflow_name="ppiflow", run_id="run-1"))
+    ledger.mark_node_running("node-1", "attempt-1")
+    ledger.record_attempt_started("node-1", "attempt-1")
     result = AppRunResult(
         status=AppRunStatus.SUCCEEDED,
         outputs=[
             AppOutput(
                 name="archive",
                 kind=ArtifactKind.ARCHIVE,
-                storage=InlineBytes(data=b"\xff\x00", filename="archive.tar.zst"),
+                storage=InlineBytes(data=b"ok", filename="archive.txt"),
             )
         ],
     )
 
-    path = ledger.record_app_result("node-1", "attempt-1", result)
+    ledger.record_app_result("node-1", "attempt-1", result)
 
-    assert path.exists()
-    data = cast(dict[str, Any], ledger._read_json(path))
+    with _connect(tmp_path) as conn:
+        row = conn.execute(
+            """
+            SELECT app_result_json
+            FROM attempts
+            WHERE node_id = 'node-1' AND attempt_id = 'attempt-1'
+            """
+        ).fetchone()
+
+    data = orjson.loads(row["app_result_json"])
     assert isinstance(data["outputs"][0]["storage"]["data"], str)
+
+
+def test_remote_call_rows_are_human_debuggable(tmp_path: Path) -> None:
+    ledger = WorkflowLedger(tmp_path)
+    ledger.create_run(WorkflowRun(workflow_name="ppiflow", run_id="run-1"))
+    ledger.mark_node_running("remote", "attempt-1")
+    ledger.record_attempt_started("remote", "attempt-1")
+
+    ledger.record_remote_call(
+        call_id="fc-123",
+        node_id="remote",
+        attempt_id="attempt-1",
+        function_name="WorkflowOrchestrator.run_remote_workflow_node",
+        call_kind="node",
+    )
+    ledger.mark_remote_call_status("fc-123", "running")
+
+    with _connect(tmp_path) as conn:
+        row = conn.execute("SELECT * FROM remote_calls WHERE call_id = 'fc-123'")
+        remote_call = row.fetchone()
+
+    assert remote_call["node_id"] == "remote"
+    assert remote_call["attempt_id"] == "attempt-1"
+    assert remote_call["status"] == "running"
+    assert (
+        remote_call["function_name"] == "WorkflowOrchestrator.run_remote_workflow_node"
+    )

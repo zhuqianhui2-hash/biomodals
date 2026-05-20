@@ -2,6 +2,7 @@
 
 # ruff: noqa: D101,D102,D103,D107
 
+import sqlite3
 from pathlib import Path
 from threading import Barrier, BrokenBarrierError
 
@@ -83,6 +84,33 @@ class RemoteOnlyNode(WorkflowNativeNode):
 
     def run(self, context):
         raise AssertionError("remote placement should use remote_node_runner")
+
+
+class FakeRemoteCall:
+    def __init__(
+        self,
+        *,
+        object_id: str,
+        result: AppRunResult,
+        on_get=None,
+        effects: list[object] | None = None,
+    ):
+        self.object_id = object_id
+        self.result = result
+        self.on_get = on_get
+        self.effects = effects or []
+        self.get_timeouts: list[float | int | None] = []
+
+    def get(self, timeout=None):
+        self.get_timeouts.append(timeout)
+        if self.on_get is not None:
+            self.on_get(timeout)
+        if self.effects:
+            effect = self.effects.pop(0)
+            if isinstance(effect, BaseException):
+                raise effect
+            return effect
+        return self.result
 
 
 class FakeVolume:
@@ -273,7 +301,9 @@ def test_single_node_exception_marks_node_and_run_failed(tmp_path: Path) -> None
     assert status.error == "fail exploded"
 
 
-def test_rerun_policy_runs_incomplete_nodes(tmp_path: Path) -> None:
+def test_running_node_without_recoverable_call_is_not_duplicated(
+    tmp_path: Path,
+) -> None:
     workflow = Workflow("demo")
     calls: list[str] = []
     workflow.add_node(FakeNode(calls=calls), id="incomplete")
@@ -288,11 +318,12 @@ def test_rerun_policy_runs_incomplete_nodes(tmp_path: Path) -> None:
     )
     result = runtime.run(run_id="run-1")
 
-    assert result.status == AppRunStatus.SUCCEEDED
-    assert calls == ["incomplete"]
+    assert result.status == AppRunStatus.PARTIAL
+    assert calls == []
+    assert runtime.ledger.load_run("demo", "run-1").status == RunStatus.RUNNING
 
 
-def test_rerun_policy_discards_incomplete_attempt_state(tmp_path: Path) -> None:
+def test_rerun_policy_discards_failed_attempt_state(tmp_path: Path) -> None:
     workflow = Workflow("demo")
     calls: list[str] = []
     workflow.add_node(FakeNode(calls=calls), id="incomplete")
@@ -300,6 +331,7 @@ def test_rerun_policy_discards_incomplete_attempt_state(tmp_path: Path) -> None:
     ledger.create_run(WorkflowRun(workflow_name="demo", run_id="run-1"))
     ledger.mark_node_running("incomplete", "attempt-old")
     ledger.record_attempt_started("incomplete", "attempt-old")
+    ledger.mark_node_failed("incomplete", "old failure")
     old_cache = tmp_path / "demo" / "run-1" / "nodes" / "incomplete" / "cache" / "old"
     old_cache.parent.mkdir(parents=True)
     old_cache.write_text("old", encoding="utf-8")
@@ -372,6 +404,182 @@ def test_remote_placement_uses_injected_remote_runner(tmp_path: Path) -> None:
 
     assert result.status == AppRunStatus.SUCCEEDED
     assert calls == [(workflow.validate().nodes["remote"].node, "remote")]
+
+
+def test_remote_placement_records_function_call_before_waiting(
+    tmp_path: Path,
+) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(RemoteOnlyNode(), id="remote")
+    observed_statuses: list[str] = []
+
+    def observe_remote_call(timeout):
+        with sqlite3.connect(tmp_path / "demo" / "run-1" / "ledger.sqlite3") as conn:
+            row = conn.execute(
+                "SELECT status FROM remote_calls WHERE call_id = 'fc-new'"
+            ).fetchone()
+        observed_statuses.append(row[0])
+
+    def remote_runner(node, context):
+        return FakeRemoteCall(
+            object_id="fc-new",
+            result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+            on_get=observe_remote_call,
+        )
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+        remote_node_runner=remote_runner,
+    )
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.SUCCEEDED
+    assert observed_statuses == ["submitted"]
+    with sqlite3.connect(tmp_path / "demo" / "run-1" / "ledger.sqlite3") as conn:
+        final_status = conn.execute(
+            "SELECT status FROM remote_calls WHERE call_id = 'fc-new'"
+        ).fetchone()[0]
+    assert final_status == "succeeded"
+
+
+def test_remote_call_failure_after_timeout_is_recorded(tmp_path: Path) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(RemoteOnlyNode(), id="remote")
+
+    def remote_runner(node, context):
+        return FakeRemoteCall(
+            object_id="fc-fail",
+            result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+            effects=[TimeoutError(), RuntimeError("remote exploded")],
+        )
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+        remote_node_runner=remote_runner,
+    )
+
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.FAILED
+    with sqlite3.connect(tmp_path / "demo" / "run-1" / "ledger.sqlite3") as conn:
+        row = conn.execute(
+            "SELECT status, error FROM remote_calls WHERE call_id = 'fc-fail'"
+        ).fetchone()
+    assert row == ("failed", "remote exploded")
+
+
+def test_remote_success_records_app_result_before_succeeded_status(
+    tmp_path: Path,
+) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(RemoteOnlyNode(), id="remote")
+
+    def remote_runner(node, context):
+        return FakeRemoteCall(
+            object_id="fc-success",
+            result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+        )
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+        remote_node_runner=remote_runner,
+    )
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.SUCCEEDED
+    with sqlite3.connect(tmp_path / "demo" / "run-1" / "ledger.sqlite3") as conn:
+        row = conn.execute(
+            """
+            SELECT app_result_json
+            FROM attempts
+            WHERE node_id = 'remote' AND attempt_id = 'attempt-1'
+            """
+        ).fetchone()
+    assert row[0] == AppRunResult(status=AppRunStatus.SUCCEEDED).model_dump_json()
+
+
+def test_remote_success_reloads_volume_before_materializing_outputs(
+    tmp_path: Path,
+) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(RemoteOnlyNode(), id="remote")
+    volume = FakeVolume()
+
+    def remote_runner(node, context):
+        return FakeRemoteCall(
+            object_id="fc-reload",
+            result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+        )
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+        workflow_volume=volume,
+        remote_node_runner=remote_runner,
+    )
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.SUCCEEDED
+    assert volume.reload_count >= 2
+
+
+def test_remote_recovery_reattaches_existing_call_before_rerun(
+    tmp_path: Path,
+) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(RemoteOnlyNode(), id="remote")
+    ledger = WorkflowLedger(tmp_path)
+    ledger.create_run(WorkflowRun(workflow_name="demo", run_id="run-1"))
+    ledger.mark_node_running(
+        "remote",
+        "attempt-old",
+        placement=NodePlacement.REMOTE,
+    )
+    ledger.record_attempt_started("remote", "attempt-old")
+    ledger.record_remote_call(
+        call_id="fc-old",
+        node_id="remote",
+        attempt_id="attempt-old",
+        function_name="WorkflowOrchestrator.run_remote_workflow_node",
+        call_kind="node",
+    )
+    resolved: list[str] = []
+    remote_runner_calls: list[str] = []
+    existing_call = FakeRemoteCall(
+        object_id="fc-old",
+        result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+    )
+
+    def resolve_call(call_id: str):
+        resolved.append(call_id)
+        return existing_call
+
+    def remote_runner(node, context):
+        remote_runner_calls.append(context.node_id)
+        raise AssertionError("existing remote call should be reattached")
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+        remote_node_runner=remote_runner,
+        function_call_resolver=resolve_call,
+    )
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.SUCCEEDED
+    assert resolved == ["fc-old"]
+    assert remote_runner_calls == []
+    assert existing_call.get_timeouts == [0]
+    status = runtime.ledger._load_node_status_or_default("remote")
+    assert status.status == NodeStatus.SUCCEEDED
 
 
 def test_runtime_passes_selected_upstream_artifacts_to_node_context(

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+import modal
+
 from biomodals.schema import (
     AppRunResult,
     NodeExecutionPolicy,
@@ -51,6 +53,7 @@ class AppBackedNode:
 
     app_name: str | None = None
     function_name: str | None = None
+    app_function: modal.Function | None = None
     execution_policy = NodeExecutionPolicy.RERUN
     placement = NodePlacement.REMOTE
 
@@ -63,14 +66,15 @@ class AppBackedNode:
         )
         return AppRunResult.model_validate(raw_result)
 
-    def load_app_function(self) -> Any:
+    def load_app_function(self) -> modal.Function:
         """Load the backing Modal function lazily."""
+        if self.app_function is not None:
+            return self.app_function
         if self.app_name is None or self.function_name is None:
             raise NotImplementedError(
                 "App-backed nodes must define app_name/function_name or override "
                 "load_app_function()"
             )
-        import modal
 
         return modal.Function.from_name(self.app_name, self.function_name)
 
@@ -80,10 +84,10 @@ class AppBackedNode:
 
     def invoke_app_function(
         self,
-        app_function: Any,
+        app_function: modal.Function,
         kwargs: dict[str, Any],
-    ) -> Any:
+    ) -> object:
         """Call a loaded Modal function."""
-        if hasattr(app_function, "remote"):
-            return app_function.remote(**kwargs)
-        return app_function(**kwargs)
+        if not hasattr(app_function, "remote"):
+            raise TypeError("App-backed nodes require a Modal function with remote()")
+        return app_function.remote(**kwargs)

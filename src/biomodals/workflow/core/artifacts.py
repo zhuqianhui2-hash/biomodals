@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import shutil
-import subprocess
 from collections.abc import Mapping
-from pathlib import Path
-from tempfile import TemporaryDirectory
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
+import orjson
 from pydantic import BaseModel
 
 from biomodals.helper.shell import sanitize_filename
@@ -30,27 +28,16 @@ def _artifact_id(producing_node_id: str, output_name: str) -> str:
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.tmp")
-    data: Any
     if isinstance(payload, BaseModel):
-        data = payload.model_dump(mode="json")
+        tmp_path.write_text(payload.model_dump_json(indent=2), encoding="utf-8")
     else:
-        data = payload
-    tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(path)
-
-
-def _extract_tar_zst_bytes(data: bytes, out_dir: Path) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-    tar_bin = shutil.which("tar")
-    if tar_bin is None:
-        raise FileNotFoundError("tar is not available in PATH")
-    with TemporaryDirectory(prefix="biomodals_artifact_extract_") as tmpdir:
-        archive_path = Path(tmpdir) / "bundle.tar.zst"
-        archive_path.write_bytes(data)
-        subprocess.run(  # noqa: S603
-            [tar_bin, "-I", "zstd", "-xf", str(archive_path), "-C", str(out_dir)],
-            check=True,
+        tmp_path.write_bytes(
+            orjson.dumps(
+                payload,
+                option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS,
+            )
         )
+    tmp_path.replace(path)
 
 
 def _artifact_files(root: Path) -> list[ArtifactFile]:
@@ -69,6 +56,20 @@ def _artifact_files(root: Path) -> list[ArtifactFile]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     ]
+
+
+def _validate_inline_text_bytes(
+    storage: InlineBytes, output_kind: ArtifactKind
+) -> None:
+    if output_kind == ArtifactKind.ARCHIVE or getattr(storage, "archive_format", None):
+        raise ValueError(
+            "InlineBytes outputs are UTF-8 text only; archive outputs must use "
+            "VolumePath storage"
+        )
+    try:
+        storage.data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("InlineBytes outputs must contain UTF-8 text bytes") from exc
 
 
 def _materialize_inline_bytes(
@@ -90,6 +91,7 @@ def _materialize_inline_bytes(
         producing_node_id,
         artifact_output_name or output_name,
     )
+    _validate_inline_text_bytes(storage, output_kind)
     safe_filename = sanitize_filename(storage.filename)
     raw_dir = raw_dir or attempt_dir / "raw_outputs"
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -99,10 +101,7 @@ def _materialize_inline_bytes(
     materialized_parent = materialized_parent or attempt_dir / "materialized_outputs"
     materialized_dir = materialized_parent / artifact_id
     materialized_dir.mkdir(parents=True, exist_ok=True)
-    if storage.archive_format == "tar.zst":
-        _extract_tar_zst_bytes(storage.data, materialized_dir)
-    else:
-        materialized_dir.joinpath(safe_filename).write_bytes(storage.data)
+    materialized_dir.joinpath(safe_filename).write_bytes(storage.data)
 
     return WorkflowArtifact(
         artifact_id=artifact_id,
@@ -122,6 +121,67 @@ def _volume_path(path: Path, volume_root: Path | None) -> str:
     if volume_root is None:
         return str(path)
     return path.relative_to(volume_root).as_posix()
+
+
+def _resolve_volume_child(root: Path, path: str) -> Path:
+    relative = PurePosixPath(path)
+    if path == "" or path == ".":
+        raise ValueError("VolumePath.path must be a non-empty relative path")
+    if relative.is_absolute() or any(
+        part in {"", ".", ".."} for part in relative.parts
+    ):
+        raise ValueError("VolumePath.path must be relative and must not traverse")
+    if "\\" in path:
+        raise ValueError("VolumePath.path must use POSIX separators")
+
+    resolved_root = root.resolve()
+    raw_path = resolved_root / Path(*relative.parts)
+    current = resolved_root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError("VolumePath.path must not contain symlinks")
+
+    resolved_path = raw_path.resolve()
+    try:
+        resolved_path.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError("VolumePath.path escapes the mounted volume root") from exc
+    return resolved_path
+
+
+def _copy_volume_path_tree(
+    *,
+    source_path: Path,
+    materialized_dir: Path,
+    source_root: Path,
+) -> None:
+    resolved_source_root = source_root.resolve()
+    if source_path.is_symlink():
+        raise ValueError("VolumePath copy source must not be a symlink")
+    if source_path.is_file():
+        materialized_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            source_path, materialized_dir / source_path.name, follow_symlinks=False
+        )
+        return
+
+    for child in sorted(source_path.rglob("*")):
+        if child.is_symlink():
+            raise ValueError("VolumePath copy source tree must not contain symlinks")
+        try:
+            child.resolve().relative_to(resolved_source_root)
+        except ValueError as exc:
+            raise ValueError(
+                "VolumePath copy source tree escapes the mounted volume root"
+            ) from exc
+
+        destination = materialized_dir / child.relative_to(source_path)
+        if child.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+        elif child.is_file():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(child, destination, follow_symlinks=False)
 
 
 def _materialize_volume_path_copy(
@@ -148,17 +208,17 @@ def _materialize_volume_path_copy(
         raise ValueError(
             f"Missing mounted volume root for output volume {storage.volume_name!r}"
         )
-    source_path = source_root / storage.path
+    source_path = _resolve_volume_child(source_root, storage.path)
     if not source_path.exists():
         raise FileNotFoundError(f"Volume output path not found: {source_path}")
 
     materialized_parent = materialized_parent or attempt_dir / "materialized_outputs"
     materialized_dir = materialized_parent / artifact_id
-    if source_path.is_dir():
-        shutil.copytree(source_path, materialized_dir, dirs_exist_ok=True)
-    else:
-        materialized_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source_path, materialized_dir / source_path.name)
+    _copy_volume_path_tree(
+        source_path=source_path,
+        materialized_dir=materialized_dir,
+        source_root=source_root,
+    )
 
     return WorkflowArtifact(
         artifact_id=artifact_id,
