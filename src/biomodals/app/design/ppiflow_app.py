@@ -181,7 +181,7 @@ class SampleAntibodyNanobodyPartialConfig(CommonConfig):
     antigen_chain: str  # Chain ID of the antigen
     heavy_chain: str
     light_chain: str | None = None  # Leave empty for nanobody design
-    start_t: float  # starting t value for sampling
+    start_t: float  # starting t value for sampling, larger preserves, smaller redesigns.
     retry_Limit: int = 10  # Maximum retry attempts if sampling fails
     config: str | Path = (
         SCRIPTS_DIR / "configs" / "inference_nanobody.yaml"
