@@ -375,6 +375,7 @@ def run_modal_app(
     """
     # TODO(workflows): add workflow run semantics separately from Modal app runs
     # so workflow-* names can stage workflow inputs before invoking orchestrators.
+    import os
     import sys
 
     app = _load_entry("app", app_name_or_path)
@@ -392,21 +393,22 @@ def run_modal_app(
             "To start an interactive shell for the app, run:\n"
             f"[bold green]{shlex.join(cmd)}[/bold green]"
         )
-    elif flags:
-        # TODO: figure out a way to tag run names into the app.
-        # Previously we used the MODAL_APP environment variable for ephemeral
-        # apps run with the --run-name flag, but with the new AppConfig API
-        # this is no longer read.
-        import os
+        return
 
-        env = os.environ.copy()
-        if gpu is not None:
-            env["GPU"] = gpu
-        if timeout is not None:
-            env["TIMEOUT"] = str(timeout)
+    # TODO: figure out a way to tag run names into the app.
+    # Previously we used the MODAL_APP environment variable for ephemeral
+    # apps run with the --run-name flag, but with the new AppConfig API
+    # this is no longer read.
+    env = os.environ.copy()
+    if gpu is not None:
+        env["GPU"] = gpu
+    if timeout is not None:
+        env["TIMEOUT"] = str(timeout)
+
+    if flags:
         run_command([*cmd, *flags], env=env)
     elif app._entrypoint is not None:
-        run_command(["biomodals", "app", "help", str(full_app)], try_rich_print=True)
+        run_command(cmd, env=env)
     else:
         run_command(["biomodals", "app", "help", str(app.path)], try_rich_print=True)
 
