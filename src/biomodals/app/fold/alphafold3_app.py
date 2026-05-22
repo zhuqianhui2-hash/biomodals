@@ -62,10 +62,10 @@ from biomodals.helper.shell import (
 CONF = AppConfig(
     tags={"group": Path(__file__).parent.name},
     name="AlphaFold3",
-    repo_url="https://github.com/google-deepmind/alphafold3",
-    repo_commit_hash="87bd9e678d9acacc4aa9baa05e820f32b80e1b49",
+    repo_url="https://github.com/y1zhou/alphafold3",
+    repo_commit_hash="987ad1cb7d7028b6d35908cf63fe7d951d98d6b6",
     package_name="alphafold3",
-    version="3.0.1",
+    version="3.0.2",
     python_version="3.12",
     cuda_version="cu130",
     gpu=os.environ.get("GPU", "L40S"),
