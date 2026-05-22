@@ -23,19 +23,10 @@ repos:
     rev: "v0.15.13"
     hooks:
       - id: ruff-check
-        args:
-          [
-            "--select",
-            "D,E,F,W,I,S,UP",
-            "--extend-ignore",
-            "E402,E501,F401,F841,S101",
-            "--exclude",
-            "logs/*,data/*",
-            "--fix",
-            "--exit-non-zero-on-fix",
-          ]
-        types_or: [python, pyi, jupyter]
+        args: ["--fix", "--exit-non-zero-on-fix"]
+        types_or: [python, pyi, jupyter, pyproject]
       - id: ruff-format
+        types_or: [python, pyi, jupyter]
 
   # yaml formatting
   # - repo: https://github.com/google/yamlfmt
