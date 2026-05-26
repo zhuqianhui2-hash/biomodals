@@ -25,9 +25,11 @@ def test_workflow_catalog_discovers_natural_workflow_names() -> None:
     workflows = get_catalog("workflow", use_absolute_paths=True)
 
     assert "ppiflow" in workflows
+    assert "shortmd" in workflows
     assert "workflow-ppiflow" not in workflows
     assert "orchestrator" not in workflows
     assert workflows["ppiflow"].name == "ppiflow_workflow.py"
+    assert workflows["shortmd"].name == "shortmd_workflow.py"
 
 
 def test_workflow_file_resolves_to_workflow_module_with_natural_name() -> None:
