@@ -10,6 +10,7 @@ from rich.markdown import Markdown
 from rich.table import Table
 
 from biomodals.helper.catalog import (
+    WORKFLOW_HOME,
     AppNotFoundError,
     BiomodalsApp,
     CatalogType,
@@ -45,10 +46,24 @@ app.add_typer(
 ##########################################
 def _load_entry(entry_type: CatalogType, name: str) -> BiomodalsApp:
     """Load a biomodals app or workflow by name or path."""
+    all_entries = get_catalog(entry_type, use_absolute_paths=True)
+    name_or_path = name.partition("::")[0]
+    if entry_type == "workflow" and name_or_path not in all_entries:
+        workflow_path = Path(name_or_path).expanduser()
+        if workflow_path.exists() and not workflow_path.resolve().is_relative_to(
+            WORKFLOW_HOME
+        ):
+            console.print(
+                "[bold red]Error[/bold red] Workflow paths must be under "
+                f"'[green]{WORKFLOW_HOME}[/green]' so they import through "
+                "'[green]biomodals.workflow[/green]'."
+            )
+            raise typer.Exit(code=1)
+
     try:
         return BiomodalsApp(
             name,
-            all_apps=get_catalog(entry_type, use_absolute_paths=True),
+            all_apps=all_entries,
         )
     except AppNotFoundError as e:
         console.print(
@@ -124,6 +139,14 @@ def _list_available_entries(
         console.print(
             "\n:dna: To see help for a workflow, use:\n"
             "     [bold]biomodals workflow help <[green]workflow-name-or-path[/green]>[/bold]"
+        )
+        console.print(
+            "\n:dna: To run a workflow on [link=https://modal.com]modal.com[/link], use:\n"
+            r"     [bold]biomodals workflow run <[green]workflow-name-or-path[/green]>[/bold] -- [gray]\[OPTIONS][/gray]"
+        )
+        console.print(
+            "\n:dna: If a workflow contains multiple local entrypoints, use it as:\n"
+            "     [bold]<[green]workflow-name-or-path[/green]>::<[green]function-name[/green]>[/bold]\n"
         )
     console.print(f"\n:dna: [bold]Available biomodals {list_type}s:[/bold]")
     console.print(table)
@@ -411,6 +434,103 @@ def run_modal_app(
         run_command(cmd, env=env)
     else:
         run_command(["biomodals", "app", "help", str(app.path)], try_rich_print=True)
+
+
+def _resolve_workflow_entrypoint(workflow: BiomodalsApp) -> str:
+    """Return the explicit or only local workflow entrypoint."""
+    if workflow._entrypoint is not None:
+        return workflow._entrypoint
+
+    local_entrypoints = [
+        workflow[entrypoint_idx] for entrypoint_idx in workflow._local_entrypoint_idx
+    ]
+    if len(local_entrypoints) == 1:
+        return local_entrypoints[0].name
+
+    if len(local_entrypoints) > 1:
+        entrypoint_names = ", ".join(
+            f"[green]{workflow.name}::{entrypoint.name}[/green]"
+            for entrypoint in local_entrypoints
+        )
+        console.print(
+            "[bold red]Error[/bold red] Workflow "
+            f"'[green]{workflow.name}[/green]' contains multiple local entrypoints; "
+            f"choose one explicitly: {entrypoint_names}"
+        )
+        raise typer.Exit(code=1)
+
+    console.print(
+        "[bold red]Error[/bold red] Workflow "
+        f"'[green]{workflow.name}[/green]' does not define a local entrypoint."
+    )
+    raise typer.Exit(code=1)
+
+
+@workflow_commands.command(
+    name="run",
+    no_args_is_help=True,
+    help="Run a biomodals workflow on Modal (alias: r).",
+)
+@workflow_commands.command(name="r", no_args_is_help=True, hidden=True)
+def run_workflow(
+    workflow_name_or_path: Annotated[
+        str, typer.Argument(help="Name or path of the workflow to run.")
+    ],
+    modal_mode: Annotated[
+        str,
+        typer.Option("--mode", "-m", help="Modal command to use ('run' or 'shell')."),
+    ] = "run",
+    detach: Annotated[
+        bool,
+        typer.Option("--detach", "-d", help="Run the modal command in detached mode."),
+    ] = False,
+    gpu: Annotated[
+        str | None,
+        typer.Option("--gpu", help="GPU type to use for the modal run (e.g. 'L40S'). "),
+    ] = None,
+    timeout: Annotated[
+        int | None,
+        typer.Option(
+            "--timeout",
+            help="Timeout in seconds for the modal run. If not specified, use the workflow default.",
+        ),
+    ] = None,
+    flags: Annotated[
+        list[str] | None,
+        typer.Argument(help="Additional flags to pass to the workflow entrypoint."),
+    ] = None,
+):
+    """Run a biomodals workflow on Modal.
+
+    Use with: `biomodals workflow run <workflow-name> [OPTIONS] -- [workflow-options]`,
+    where `[workflow-options]` are passed to the workflow local entrypoint.
+    """
+    import os
+    import sys
+
+    workflow = _load_entry("workflow", workflow_name_or_path)
+    entrypoint = _resolve_workflow_entrypoint(workflow)
+    full_workflow = f"{workflow.module}::{entrypoint}"
+
+    cmd = [sys.executable, "-m", "modal", modal_mode]
+    if detach:
+        cmd.append("-d")
+    cmd.extend(["-m", full_workflow])
+
+    if modal_mode == "shell":
+        console.print(
+            "To start an interactive shell for the workflow, run:\n"
+            f"[bold green]{shlex.join(cmd)}[/bold green]"
+        )
+        return
+
+    env = os.environ.copy()
+    if gpu is not None:
+        env["GPU"] = gpu
+    if timeout is not None:
+        env["TIMEOUT"] = str(timeout)
+
+    run_command([*cmd, *(flags or [])], env=env)
 
 
 @app_commands.command(

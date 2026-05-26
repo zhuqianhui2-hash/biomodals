@@ -3,7 +3,12 @@
 from modal import Image
 
 
-def patch_image_for_helper(image: Image, copy_patch_files: bool = False) -> Image:
+def patch_image_for_helper(
+    image: Image,
+    *,
+    copy_patch_files: bool = False,
+    include_workflow_modules: bool = False,
+) -> Image:
     """Patch a Modal Image to include helper dependencies.
 
     Args:
@@ -15,6 +20,8 @@ def patch_image_for_helper(image: Image, copy_patch_files: bool = False) -> Imag
             This can slow down iteration since it requires a rebuild of the Image
             and any subsequent build steps whenever the included files change,
             but it is required if you want to run additional build steps after this one.
+        include_workflow_modules: Whether to include workflow modules in the patch.
+            By default, only helper dependencies are included.
     """
     # This is a bit hacky, but because Modal's .add_local_python_source()
     # does not install the package, the metadata.requires call would not work
@@ -26,17 +33,20 @@ def patch_image_for_helper(image: Image, copy_patch_files: bool = False) -> Imag
     except metadata.PackageNotFoundError:
         helper_deps = []
 
+    mods = [
+        "biomodals.helper",
+        "biomodals.app.constant",
+        "biomodals.app.config",
+        "biomodals.schema",
+    ]
+    if include_workflow_modules:
+        mods.append("biomodals.workflow")
+
     return (
         image
         .apt_install("zstd", "fd-find")
         .uv_pip_install(helper_deps)
-        .add_local_python_source(
-            "biomodals.helper",
-            "biomodals.app.constant",
-            "biomodals.app.config",
-            "biomodals.schema",
-            copy=copy_patch_files,
-        )
+        .add_local_python_source(*mods, copy=copy_patch_files)
     )
 
 

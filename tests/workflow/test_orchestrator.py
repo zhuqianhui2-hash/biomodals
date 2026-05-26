@@ -2,8 +2,6 @@
 
 # ruff: noqa: D101,D102,D103,D107
 
-import sys
-import types
 from pathlib import Path
 from typing import Any, cast
 
@@ -43,8 +41,10 @@ def _raw_orchestrator() -> tuple[Any, Any]:
     return raw_cls, raw_cls()
 
 
-def test_orchestrator_method_uses_runtime_from_definition(monkeypatch) -> None:
+def test_orchestrator_run_uses_runtime_from_definition(monkeypatch) -> None:
     calls: dict[str, object] = {}
+    volume = FakeVolume()
+    monkeypatch.setattr(orchestrator, "OUT_VOLUME", volume)
 
     class FakeRuntime:
         @classmethod
@@ -52,7 +52,7 @@ def test_orchestrator_method_uses_runtime_from_definition(monkeypatch) -> None:
             cls,
             *,
             workflow_name: str,
-            workflow_definition: dict[str, object],
+            workflow_definition: Workflow,
             volume_root: Path,
             workflow_volume_name: str,
             workflow_volume=None,
@@ -77,14 +77,17 @@ def test_orchestrator_method_uses_runtime_from_definition(monkeypatch) -> None:
             calls["force"] = force
             return AppRunResult(status=AppRunStatus.SUCCEEDED)
 
+        def close(self) -> None:
+            calls["closed"] = True
+
     monkeypatch.setattr(orchestrator, "WorkflowRuntime", FakeRuntime)
 
     raw_cls, instance = _raw_orchestrator()
-    result = raw_cls.run_workflow_orchestrator._get_raw_f()(
+    workflow = Workflow("demo")
+    result = raw_cls.run._get_raw_f()(
         instance,
-        workflow_name="demo",
+        workflow=workflow,
         run_id="run-1",
-        workflow_definition={"nodes": []},
         force=True,
         max_ready_workers=7,
     )
@@ -92,33 +95,42 @@ def test_orchestrator_method_uses_runtime_from_definition(monkeypatch) -> None:
     assert result.status == AppRunStatus.SUCCEEDED
     assert calls == {
         "workflow_name": "demo",
-        "workflow_definition": {"nodes": []},
+        "workflow_definition": workflow,
         "volume_root": Path(orchestrator.CONF.output_volume_mountpoint),
         "workflow_volume_name": "WorkflowOrchestrator-outputs",
-        "workflow_volume": orchestrator.OUT_VOLUME,
+        "workflow_volume": volume,
         "remote_node_runner": calls["remote_node_runner"],
         "remote_node_function_name": orchestrator.REMOTE_NODE_FUNCTION_NAME,
         "function_call_resolver": calls["function_call_resolver"],
         "max_ready_workers": 7,
         "run_id": "run-1",
         "force": True,
+        "closed": True,
     }
     assert calls["remote_node_runner"] is not None
     assert callable(calls["function_call_resolver"])
+    assert volume.reload_count == 1
+    assert volume.commit_count == 1
 
 
-def test_orchestrator_method_passes_remote_node_runner_and_resolver(
+def test_orchestrator_run_passes_remote_node_runner_and_resolver(
     monkeypatch,
+    tmp_path: Path,
 ) -> None:
     calls: dict[str, object] = {}
+    volume = FakeVolume()
+    monkeypatch.setattr(orchestrator, "OUT_VOLUME", volume)
 
     class FakeRuntime:
+        def __init__(self, remote_node_runner) -> None:
+            self.remote_node_runner = remote_node_runner
+
         @classmethod
         def from_definition(
             cls,
             *,
             workflow_name: str,
-            workflow_definition: dict[str, object],
+            workflow_definition: Workflow,
             volume_root: Path,
             workflow_volume_name: str,
             workflow_volume=None,
@@ -131,19 +143,43 @@ def test_orchestrator_method_passes_remote_node_runner_and_resolver(
             calls["remote_node_function_name"] = remote_node_function_name
             calls["function_call_resolver"] = function_call_resolver
             calls["max_ready_workers"] = max_ready_workers
-            return cls()
+            return cls(remote_node_runner)
 
         def run(self, *, run_id: str, force: bool = False) -> AppRunResult:
+            context = NodeRunContext(
+                run_id=run_id,
+                node_id="remote",
+                attempt_id="attempt-1",
+                cache_dir=tmp_path / "cache",
+                inputs={},
+            )
+            calls["remote_call"] = self.remote_node_runner(SucceedNode(), context)
             return AppRunResult(status=AppRunStatus.SUCCEEDED)
+
+        def close(self) -> None:
+            calls["closed"] = True
 
     monkeypatch.setattr(orchestrator, "WorkflowRuntime", FakeRuntime)
 
+    class FakeFunctionCall:
+        object_id = "fc-remote"
+
+        def get(self):
+            return AppRunResult(status=AppRunStatus.SUCCEEDED)
+
+    def fake_spawn(remote_method, node, context):
+        calls["remote_method"] = remote_method
+        calls["remote_node"] = node
+        calls["remote_context"] = context
+        return FakeFunctionCall()
+
+    monkeypatch.setattr(orchestrator, "_spawn_remote_workflow_node", fake_spawn)
+
     raw_cls, instance = _raw_orchestrator()
-    result = raw_cls.run_workflow_orchestrator._get_raw_f()(
+    result = raw_cls.run._get_raw_f()(
         instance,
-        workflow_name="demo",
+        workflow=Workflow("demo"),
         run_id="run-1",
-        workflow_definition={"nodes": []},
         max_ready_workers=9,
     )
 
@@ -152,6 +188,13 @@ def test_orchestrator_method_passes_remote_node_runner_and_resolver(
     assert calls["remote_node_function_name"] == orchestrator.REMOTE_NODE_FUNCTION_NAME
     assert callable(calls["function_call_resolver"])
     assert calls["max_ready_workers"] == 9
+    assert getattr(calls["remote_method"], "__name__", None) == "run_node"
+    assert isinstance(calls["remote_node"], SucceedNode)
+    assert calls["remote_context"].run_id == "run-1"
+    assert calls["remote_call"].object_id == "fc-remote"
+    assert calls["closed"] is True
+    assert volume.reload_count == 1
+    assert volume.commit_count == 1
 
 
 def test_orchestrator_enter_closes_stale_runtime_before_reload(monkeypatch) -> None:
@@ -215,7 +258,7 @@ def test_orchestrator_remote_node_method_commits_after_exception(
 
     with pytest.raises(RuntimeError, match="remote failed"):
         raw_cls, instance = _raw_orchestrator()
-        raw_cls.run_remote_workflow_node._get_raw_f()(
+        raw_cls.run_node._get_raw_f()(
             instance,
             RaisingNode(),
             context,
@@ -225,80 +268,15 @@ def test_orchestrator_remote_node_method_commits_after_exception(
     assert volume.commit_count == 1
 
 
-def test_submit_workflow_run_waits_for_remote_result() -> None:
-    calls: dict[str, object] = {}
+def test_orchestrator_rejects_serialized_workflow_dict() -> None:
+    raw_cls, instance = _raw_orchestrator()
 
-    class FakeOrchestratorFunction:
-        def remote(self, **kwargs):
-            calls.update(kwargs)
-            return AppRunResult(status=AppRunStatus.SUCCEEDED)
-
-    result = orchestrator.submit_workflow_run(
-        orchestrator_function=cast(Any, FakeOrchestratorFunction()),
-        workflow_name="demo",
-        run_id="run-1",
-        workflow_definition={"nodes": []},
-        force=True,
-        max_ready_workers=11,
-    )
-
-    assert result == AppRunResult(status=AppRunStatus.SUCCEEDED)
-    assert calls == {
-        "workflow_name": "demo",
-        "run_id": "run-1",
-        "workflow_definition": {"nodes": []},
-        "force": True,
-        "max_ready_workers": 11,
-    }
-
-
-def test_submit_workflow_run_can_spawn_without_waiting() -> None:
-    calls: dict[str, object] = {}
-
-    class FakeCall:
-        object_id = "fc-123"
-
-    class FakeOrchestratorFunction:
-        def spawn(self, **kwargs):
-            calls.update(kwargs)
-            return FakeCall()
-
-    function_call_id = orchestrator.submit_workflow_run(
-        orchestrator_function=cast(Any, FakeOrchestratorFunction()),
-        workflow_name="demo",
-        run_id="run-1",
-        workflow_definition={"nodes": []},
-        wait=False,
-    )
-
-    assert function_call_id == "fc-123"
-    assert calls["workflow_name"] == "demo"
-    assert calls["run_id"] == "run-1"
-
-
-def test_load_workflow_definition_rejects_serialized_dict_factory(
-    monkeypatch,
-) -> None:
-    module = types.ModuleType("fake_workflow_factory")
-    module.build = lambda: {"nodes": []}
-    monkeypatch.setitem(sys.modules, "fake_workflow_factory", module)
-
-    with pytest.raises(TypeError, match="must return a Workflow"):
-        orchestrator.load_workflow_definition("fake_workflow_factory:build")
-
-
-def test_load_workflow_definition_accepts_importable_module_factory(
-    monkeypatch,
-) -> None:
-    workflow = Workflow("demo")
-    module = types.ModuleType("importable_workflow_factory")
-    module.build = lambda: workflow
-    monkeypatch.setitem(sys.modules, "importable_workflow_factory", module)
-
-    assert (
-        orchestrator.load_workflow_definition("importable_workflow_factory:build")
-        is workflow
-    )
+    with pytest.raises(TypeError, match="Workflow object"):
+        raw_cls.run._get_raw_f()(
+            instance,
+            workflow={"nodes": []},
+            run_id="run-1",
+        )
 
 
 def test_runtime_from_definition_accepts_python_workflow(tmp_path: Path) -> None:
@@ -319,3 +297,12 @@ def test_runtime_from_definition_accepts_python_workflow(tmp_path: Path) -> None
 def test_orchestrator_modal_app_uses_python_313_runtime() -> None:
     assert orchestrator.CONF.python_version == "3.13"
     assert orchestrator.WorkflowOrchestrator is not None
+
+
+def test_orchestrator_app_exposes_only_class_remote_surface() -> None:
+    functions = orchestrator.app._local_state.functions
+
+    assert "WorkflowOrchestrator.*" in functions
+    assert "run_workflow_orchestrator" not in functions
+    assert "run_remote_workflow_node" not in functions
+    assert "submit_workflow_orchestrator_task" not in functions

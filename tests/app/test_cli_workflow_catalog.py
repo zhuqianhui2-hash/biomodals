@@ -2,9 +2,14 @@
 
 # ruff: noqa: D103
 
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
 from typer.testing import CliRunner
 
 from biomodals.cli import _load_entry, app
+from biomodals.helper.catalog import AppFunction
 
 runner = CliRunner()
 
@@ -51,3 +56,94 @@ def test_top_level_deploy_remains_app_compatibility_alias() -> None:
 
     assert result.exit_code == 0
     assert "Name or path of the app to deploy" in result.output
+
+
+def test_workflow_run_uses_canonical_module_entrypoint_and_passes_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def fake_run_command(cmd: list[str], **kwargs) -> None:
+        calls.append((cmd, kwargs.get("env")))
+
+    monkeypatch.setattr("biomodals.cli.run_command", fake_run_command)
+    result = runner.invoke(
+        app,
+        [
+            "workflow",
+            "run",
+            "ppiflow",
+            "--gpu",
+            "L40S",
+            "--timeout",
+            "123",
+            "--",
+            "--input-dir",
+            "inputs",
+            "--replicates",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    cmd, env = calls[0]
+    assert cmd[2:] == [
+        "modal",
+        "run",
+        "-m",
+        "biomodals.workflow.ppiflow_workflow::submit_ppiflow_workflow",
+        "--input-dir",
+        "inputs",
+        "--replicates",
+        "2",
+    ]
+    assert env is not None
+    assert env["GPU"] == "L40S"
+    assert env["TIMEOUT"] == "123"
+
+
+def test_workflow_run_rejects_files_outside_workflow_package(tmp_path: Path) -> None:
+    ad_hoc_workflow = tmp_path / "ad_hoc_workflow.py"
+    ad_hoc_workflow.write_text('"""Not a packaged Biomodals workflow."""\n')
+
+    result = runner.invoke(app, ["workflow", "run", str(ad_hoc_workflow)])
+
+    assert result.exit_code == 1
+    assert "Workflow paths must be under" in result.output
+    assert "biomodals.workflow" in result.output
+
+
+@dataclass
+class _FakeWorkflow:
+    name: str = "ambiguous"
+    module: str = "biomodals.workflow.ambiguous_workflow"
+    path: Path = Path("src/biomodals/workflow/ambiguous_workflow.py")
+    _entrypoint: str | None = None
+
+    def __post_init__(self) -> None:
+        self._local_entrypoint_idx = [0, 1]
+        self.functions = [
+            AppFunction("first", "local_entrypoint", None, []),
+            AppFunction("second", "local_entrypoint", None, []),
+        ]
+
+    def __getitem__(self, name: str | int) -> AppFunction:
+        if isinstance(name, str):
+            for function in self.functions:
+                if function.name == name:
+                    return function
+            raise KeyError(name)
+        return self.functions[name]
+
+
+def test_workflow_run_requires_entrypoint_for_multiple_local_entrypoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("biomodals.cli._load_entry", lambda *_args: _FakeWorkflow())
+
+    result = runner.invoke(app, ["workflow", "run", "ambiguous"])
+
+    assert result.exit_code == 1
+    assert "contains multiple local entrypoints" in result.output
+    assert "::first" in result.output
+    assert "::second" in result.output

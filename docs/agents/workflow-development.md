@@ -194,11 +194,39 @@ fake queues and fake function calls.
 ## Orchestrator Submission
 
 The reusable workflow orchestrator lives under `biomodals.workflow.core` and is
-not a user-facing workflow script. Define it as a Modal class so lifecycle hooks
-can reload and commit durable state around run execution and cleanup. Its local
-helper accepts a no-argument Python factory in `module:function` form and
-submits the returned `Workflow` object to the remote orchestrator.
-Domain-specific input staging belongs in top-level workflow scripts.
+not a user-facing workflow script. Workflow scripts should import the module and
+compose its app into their own Modal app:
+
+```python
+from biomodals.workflow.core import orchestrator
+
+app = modal.App(...).include(orchestrator.app)
+```
+
+All remote orchestration functions should live as methods on
+`WorkflowOrchestrator`. Workflow apps may use the included
+`WorkflowOrchestrator` methods for run submission, but the reusable orchestrator
+must not perform deployed app lookups, import workflow app functions by name, or
+handle hydration details for workflow-specific apps. Domain-specific input
+staging and DAG construction belong in top-level workflow scripts.
+
+Keep the public orchestrator method surface minimal. The intended remote methods
+are `WorkflowOrchestrator.run(...)` for a whole workflow run and
+`WorkflowOrchestrator.run_node(...)` for isolated remote node execution. Do not
+add convenience wrappers or alternate submission APIs unless they cover a large
+missing capability or a clear ergonomics gap.
+
+The reusable orchestrator module should not expose a local entrypoint for generic
+workflow submission. Each user-facing workflow script owns its own local
+entrypoint, stages its own inputs, builds its `Workflow` object, and submits that
+object to the included `WorkflowOrchestrator`.
+
+The orchestrator API accepts `Workflow` objects only. Workflow scripts build the
+DAG locally and submit that object to the included `WorkflowOrchestrator`
+method. The orchestrator should not accept serialized workflow dictionaries or
+workflow factory import strings as its primary run contract. Workflow node
+classes must therefore be importable in remote containers by their canonical
+package-qualified module names.
 
 ## CLI Namespace
 
@@ -211,6 +239,20 @@ commands can exist as placeholders until the runtime execution interface is
 stable. Existing top-level app commands may remain as deprecated aliases for one
 transition period, but documentation and smoke tests should prefer the
 namespaced commands.
+
+Workflows should be launched through the `biomodals workflow run` CLI rather
+than by running workflow Python files directly. The run command is responsible
+for importing workflow modules through the catalog/package path so workflow node
+classes serialize with stable canonical module names before being submitted to
+the included `WorkflowOrchestrator`. Its user-facing flags should mirror
+`biomodals app run`, including Modal mode, detach, timeout, and pass-through
+workflow flags after `--`.
+The command may accept workflow paths only when they resolve to package-qualified
+modules under the Biomodals workflow package. Reject ad hoc workflow files that
+cannot be imported by a stable package module path.
+Use Modal's module mode for workflow runs, for example
+`python -m modal run -m biomodals.workflow.shortmd_workflow::submit_shortmd_workflow`,
+so local and remote containers agree on workflow node class module names.
 
 ## App Interfaces
 
@@ -231,6 +273,17 @@ arguments.
 `modal.Function`. An app-backed node is not expected to call a regular Python
 `Callable`; unit tests may use fakes at the Modal boundary, but production node
 contracts should stay Modal-function based.
+
+Prefer `AppBackedNode` for workflow nodes whose primary job is to invoke a
+deployed app function. App-backed nodes store app names, function names, and
+primitive or Pydantic arguments; they must not store hydrated Modal function
+handles. This keeps workflow DAGs portable across local and remote containers
+and avoids making reusable workflows responsible for Modal object hydration.
+Workflow definitions should reuse app functions whenever possible. Add
+`WorkflowNativeNode` implementations only when the source app lacks a needed
+function or when workflow-specific adapters are required to transform artifacts
+between apps. Use native nodes for lightweight transforms, selectors, summaries,
+and file-management glue that are not app function invocations.
 
 When adding a workflow-compatible app function, keep existing local entrypoint
 behavior unchanged and add a focused pytest contract test that does not call

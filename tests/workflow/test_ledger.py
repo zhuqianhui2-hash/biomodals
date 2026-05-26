@@ -199,7 +199,7 @@ def test_remote_call_rows_are_human_debuggable(tmp_path: Path) -> None:
         call_id="fc-123",
         node_id="remote",
         attempt_id="attempt-1",
-        function_name="WorkflowOrchestrator.run_remote_workflow_node",
+        function_name="run_node",
         call_kind="node",
     )
     ledger.mark_remote_call_status("fc-123", "running")
@@ -211,6 +211,4 @@ def test_remote_call_rows_are_human_debuggable(tmp_path: Path) -> None:
     assert remote_call["node_id"] == "remote"
     assert remote_call["attempt_id"] == "attempt-1"
     assert remote_call["status"] == "running"
-    assert (
-        remote_call["function_name"] == "WorkflowOrchestrator.run_remote_workflow_node"
-    )
+    assert remote_call["function_name"] == "run_node"

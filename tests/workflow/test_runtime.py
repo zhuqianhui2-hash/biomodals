@@ -539,7 +539,7 @@ def test_remote_placement_records_configured_function_name(
         volume_root=tmp_path,
         workflow_volume_name="Workflow-outputs",
         remote_node_runner=remote_runner,
-        remote_node_function_name="WorkflowOrchestrator.run_remote_workflow_node",
+        remote_node_function_name="run_node",
     )
     result = runtime.run(run_id="run-1")
 
@@ -548,7 +548,7 @@ def test_remote_placement_records_configured_function_name(
         function_name = conn.execute(
             "SELECT function_name FROM remote_calls WHERE call_id = 'fc-named'"
         ).fetchone()[0]
-    assert function_name == "WorkflowOrchestrator.run_remote_workflow_node"
+    assert function_name == "run_node"
 
 
 def test_remote_call_failure_after_timeout_is_recorded(tmp_path: Path) -> None:
@@ -654,7 +654,7 @@ def test_remote_recovery_reattaches_existing_call_before_rerun(
         call_id="fc-old",
         node_id="remote",
         attempt_id="attempt-old",
-        function_name="WorkflowOrchestrator.run_remote_workflow_node",
+        function_name="run_node",
         call_kind="node",
     )
     resolved: list[str] = []
