@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from fnmatch import fnmatch
@@ -790,7 +790,17 @@ class WorkflowLedger:
 
     def close(self) -> None:
         """Close the active SQLite connection, if one is open."""
-        self._close()
+        with self._lock:
+            self._close()
+
+    @contextmanager
+    def closed_for_volume_sync(self) -> Iterator[None]:
+        """Close the SQLite connection while synchronizing the backing volume."""
+        with self._lock:
+            # Modal Volume sync fails if SQLite keeps ledger files open. Hold the
+            # ledger lock so another scheduler worker cannot reopen them mid-sync.
+            self._close()
+            yield
 
     @staticmethod
     def _artifact_matches_selector(
@@ -939,11 +949,12 @@ class WorkflowLedger:
             self.run_root.joinpath(name).mkdir(exist_ok=True)
 
     def _activate(self, workflow_name: str, run_id: str) -> None:
-        if self.workflow_name == workflow_name and self.run_id == run_id:
-            return
-        self._close()
-        self.workflow_name = workflow_name
-        self.run_id = run_id
+        with self._lock:
+            if self.workflow_name == workflow_name and self.run_id == run_id:
+                return
+            self._close()
+            self.workflow_name = workflow_name
+            self.run_id = run_id
 
     @contextmanager
     def _transaction(self):

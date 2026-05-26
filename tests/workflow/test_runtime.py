@@ -119,11 +119,17 @@ class FakeVolume:
     def __init__(self) -> None:
         self.commit_count = 0
         self.reload_count = 0
+        self.on_commit = None
+        self.on_reload = None
 
     def commit(self) -> None:
+        if self.on_commit is not None:
+            self.on_commit()
         self.commit_count += 1
 
     def reload(self) -> None:
+        if self.on_reload is not None:
+            self.on_reload()
         self.reload_count += 1
 
 
@@ -147,6 +153,35 @@ class BytesConfiguredNode(WorkflowNativeNode):
 
     def run(self, context):
         return AppRunResult(status=AppRunStatus.SUCCEEDED)
+
+
+def test_volume_sync_closes_open_ledger_connection(tmp_path: Path) -> None:
+    workflow = Workflow("demo")
+    volume = FakeVolume()
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+        workflow_volume=volume,
+    )
+    runtime.ledger.create_run(WorkflowRun(workflow_name="demo", run_id="run-1"))
+    assert runtime.ledger._connection is not None
+
+    def assert_ledger_closed() -> None:
+        assert runtime.ledger._connection is None
+
+    volume.on_reload = assert_ledger_closed
+    volume.on_commit = assert_ledger_closed
+
+    runtime._reload_volume()
+    runtime.ledger.load_run("demo", "run-1")
+    assert runtime.ledger._connection is not None
+
+    runtime._commit_volume()
+
+    assert volume.reload_count == 1
+    assert volume.commit_count == 1
+    assert runtime.ledger._connection is None
 
 
 def test_completed_nodes_are_skipped(tmp_path: Path) -> None:

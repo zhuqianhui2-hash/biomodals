@@ -632,11 +632,13 @@ class WorkflowRuntime:
 
     def _commit_volume(self) -> None:
         if self.workflow_volume is not None:
-            self.workflow_volume.commit()
+            with self.ledger.closed_for_volume_sync():
+                self.workflow_volume.commit()
 
     def _reload_volume(self) -> None:
         if self.workflow_volume is not None:
-            self.workflow_volume.reload()
+            with self.ledger.closed_for_volume_sync():
+                self.workflow_volume.reload()
 
     def close(self) -> None:
         """Close durable local resources owned by the runtime."""
