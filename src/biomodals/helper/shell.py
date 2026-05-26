@@ -345,4 +345,7 @@ def sanitize_filename(filename: str, separator: str = "_") -> str:
 
     root_dir = Path(os.sep)
     f = (root_dir / filename.strip()).resolve().relative_to(root_dir)
-    return separator.join(f.parts)
+    sanitized = separator.join(f.parts)
+    if not sanitized:
+        raise ValueError("Value must contain at least one safe filename component")
+    return sanitized
