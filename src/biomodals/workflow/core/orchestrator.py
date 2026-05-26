@@ -79,6 +79,7 @@ def submit_workflow_run(
     workflow_definition: Workflow | dict[str, object],
     force: bool = False,
     wait: bool = True,
+    max_ready_workers: int = 32,
 ) -> AppRunResult | str:
     """Submit one workflow run to a remote orchestrator function."""
     kwargs = {
@@ -86,6 +87,7 @@ def submit_workflow_run(
         "run_id": run_id,
         "workflow_definition": workflow_definition,
         "force": force,
+        "max_ready_workers": max_ready_workers,
     }
     if wait:
         return AppRunResult.model_validate(orchestrator_function.remote(**kwargs))
@@ -127,6 +129,7 @@ class WorkflowOrchestrator:
         run_id: str,
         workflow_definition: Workflow | dict[str, object],
         force: bool = False,
+        max_ready_workers: int = 32,
     ) -> AppRunResult:
         """Run one workflow definition through the workflow runtime."""
         orchestrator_handle = WorkflowOrchestrator()
@@ -150,6 +153,7 @@ class WorkflowOrchestrator:
             remote_node_runner=remote_node_runner,
             remote_node_function_name=REMOTE_NODE_FUNCTION_NAME,
             function_call_resolver=modal.FunctionCall.from_id,
+            max_ready_workers=max_ready_workers,
         )
         self._runtime = runtime
         try:
@@ -192,6 +196,7 @@ def submit_workflow_orchestrator_task(
     workflow_name: str | None = None,
     force: bool = False,
     wait: bool = True,
+    max_ready_workers: int = 32,
 ) -> None:
     """Submit a Python workflow definition factory to the remote orchestrator.
 
@@ -204,6 +209,8 @@ def submit_workflow_orchestrator_task(
         force: Replace an existing run ledger instead of resuming it.
         wait: Wait locally for the remote orchestrator result. Disable to print
             the Modal function call id for asynchronous collection.
+        max_ready_workers: Maximum number of ready workflow nodes to execute
+            concurrently in one scheduler wave.
 
     """
     workflow_definition = load_workflow_definition(workflow_factory)
@@ -217,6 +224,7 @@ def submit_workflow_orchestrator_task(
         workflow_definition=workflow_definition,
         force=force,
         wait=wait,
+        max_ready_workers=max_ready_workers,
     )
     if isinstance(result, AppRunResult):
         print(f"Workflow run finished with status: {result.status}")

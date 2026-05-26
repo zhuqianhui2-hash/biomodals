@@ -98,6 +98,7 @@ class WorkflowRuntime:
         remote_node_runner: RemoteNodeRunner | None = None,
         remote_node_function_name: str | None = None,
         function_call_resolver: FunctionCallResolver | None = None,
+        max_ready_workers: int = 32,
     ) -> WorkflowRuntime:
         """Create a runtime from a Python workflow definition."""
         if isinstance(workflow_definition, Workflow):
@@ -115,6 +116,7 @@ class WorkflowRuntime:
                 remote_node_runner=remote_node_runner,
                 remote_node_function_name=remote_node_function_name,
                 function_call_resolver=function_call_resolver,
+                max_ready_workers=max_ready_workers,
             )
         raise NotImplementedError(
             "Serialized workflow definition dictionaries are deferred; pass a "
@@ -582,6 +584,11 @@ class WorkflowRuntime:
             return value.model_dump(mode="json", round_trip=True)
         if isinstance(value, Enum):
             return value.value
+        if isinstance(value, bytes):
+            return {
+                "bytes_sha256": hashlib.sha256(value).hexdigest(),
+                "size_bytes": len(value),
+            }
         if isinstance(value, Path):
             return value.as_posix()
         if is_dataclass(value) and not isinstance(value, type):

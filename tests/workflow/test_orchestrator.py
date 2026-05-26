@@ -59,6 +59,7 @@ def test_orchestrator_method_uses_runtime_from_definition(monkeypatch) -> None:
             remote_node_runner=None,
             remote_node_function_name=None,
             function_call_resolver=None,
+            max_ready_workers: int = 32,
         ):
             calls["workflow_name"] = workflow_name
             calls["workflow_definition"] = workflow_definition
@@ -68,6 +69,7 @@ def test_orchestrator_method_uses_runtime_from_definition(monkeypatch) -> None:
             calls["remote_node_runner"] = remote_node_runner
             calls["remote_node_function_name"] = remote_node_function_name
             calls["function_call_resolver"] = function_call_resolver
+            calls["max_ready_workers"] = max_ready_workers
             return cls()
 
         def run(self, *, run_id: str, force: bool = False) -> AppRunResult:
@@ -84,6 +86,7 @@ def test_orchestrator_method_uses_runtime_from_definition(monkeypatch) -> None:
         run_id="run-1",
         workflow_definition={"nodes": []},
         force=True,
+        max_ready_workers=7,
     )
 
     assert result.status == AppRunStatus.SUCCEEDED
@@ -96,6 +99,7 @@ def test_orchestrator_method_uses_runtime_from_definition(monkeypatch) -> None:
         "remote_node_runner": calls["remote_node_runner"],
         "remote_node_function_name": orchestrator.REMOTE_NODE_FUNCTION_NAME,
         "function_call_resolver": calls["function_call_resolver"],
+        "max_ready_workers": 7,
         "run_id": "run-1",
         "force": True,
     }
@@ -121,10 +125,12 @@ def test_orchestrator_method_passes_remote_node_runner_and_resolver(
             remote_node_runner=None,
             remote_node_function_name=None,
             function_call_resolver=None,
+            max_ready_workers: int = 32,
         ):
             calls["remote_node_runner"] = remote_node_runner
             calls["remote_node_function_name"] = remote_node_function_name
             calls["function_call_resolver"] = function_call_resolver
+            calls["max_ready_workers"] = max_ready_workers
             return cls()
 
         def run(self, *, run_id: str, force: bool = False) -> AppRunResult:
@@ -138,12 +144,14 @@ def test_orchestrator_method_passes_remote_node_runner_and_resolver(
         workflow_name="demo",
         run_id="run-1",
         workflow_definition={"nodes": []},
+        max_ready_workers=9,
     )
 
     assert result.status == AppRunStatus.SUCCEEDED
     assert calls["remote_node_runner"] is not None
     assert calls["remote_node_function_name"] == orchestrator.REMOTE_NODE_FUNCTION_NAME
     assert callable(calls["function_call_resolver"])
+    assert calls["max_ready_workers"] == 9
 
 
 def test_orchestrator_enter_closes_stale_runtime_before_reload(monkeypatch) -> None:
@@ -231,6 +239,7 @@ def test_submit_workflow_run_waits_for_remote_result() -> None:
         run_id="run-1",
         workflow_definition={"nodes": []},
         force=True,
+        max_ready_workers=11,
     )
 
     assert result == AppRunResult(status=AppRunStatus.SUCCEEDED)
@@ -239,6 +248,7 @@ def test_submit_workflow_run_waits_for_remote_result() -> None:
         "run_id": "run-1",
         "workflow_definition": {"nodes": []},
         "force": True,
+        "max_ready_workers": 11,
     }
 
 

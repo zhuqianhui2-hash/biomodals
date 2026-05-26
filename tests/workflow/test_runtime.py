@@ -141,6 +141,14 @@ class ConfiguredNode(WorkflowNativeNode):
         return AppRunResult(status=AppRunStatus.SUCCEEDED)
 
 
+@dataclass
+class BytesConfiguredNode(WorkflowNativeNode):
+    payload: bytes
+
+    def run(self, context):
+        return AppRunResult(status=AppRunStatus.SUCCEEDED)
+
+
 def test_completed_nodes_are_skipped(tmp_path: Path) -> None:
     workflow = Workflow("demo")
     workflow.add_node(ExplodingNode(), id="done")
@@ -343,6 +351,24 @@ def test_runtime_dag_hash_uses_stable_json_for_dataclass_node_config() -> None:
             output_path=Path("outputs/report.txt"),
         ),
         id="configured",
+    )
+
+    first_hash = WorkflowRuntime._dag_hash(first_workflow.validate())
+    second_hash = WorkflowRuntime._dag_hash(second_workflow.validate())
+    repeated_hash = WorkflowRuntime._dag_hash(repeated_workflow.validate())
+
+    assert first_hash != second_hash
+    assert first_hash == repeated_hash
+
+
+def test_runtime_dag_hash_supports_bytes_in_dataclass_node_config() -> None:
+    first_workflow = Workflow("demo")
+    first_workflow.add_node(BytesConfiguredNode(payload=b"ATOM 1\n"), id="configured")
+    second_workflow = Workflow("demo")
+    second_workflow.add_node(BytesConfiguredNode(payload=b"ATOM 2\n"), id="configured")
+    repeated_workflow = Workflow("demo")
+    repeated_workflow.add_node(
+        BytesConfiguredNode(payload=b"ATOM 1\n"), id="configured"
     )
 
     first_hash = WorkflowRuntime._dag_hash(first_workflow.validate())

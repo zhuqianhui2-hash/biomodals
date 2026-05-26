@@ -64,6 +64,11 @@ def test_duplicate_node_ids_raise_value_error() -> None:
         workflow.add_node(DummyNode(), id="design")
 
 
+def test_empty_sanitized_workflow_name_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="safe filename"):
+        Workflow("///")
+
+
 def test_cycles_raise_value_error() -> None:
     workflow = Workflow("demo")
     first = workflow.add_node(DummyNode(), id="first")
