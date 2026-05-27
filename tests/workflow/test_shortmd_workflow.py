@@ -133,11 +133,19 @@ def test_shortmd_prep_node_runs_gromacs_prepare_and_returns_artifact(
     monkeypatch,
 ) -> None:
     prepare_kwargs = {}
+    clear_kwargs = {}
+    events = []
 
     class FakePrepareFunction:
         def remote(self, **kwargs):
+            events.append("prepare")
             prepare_kwargs.update(kwargs)
             return f"{gromacs_app.CONF.output_volume_mountpoint}/prepared/source"
+
+    class FakeClearFunction:
+        def remote(self, **kwargs):
+            events.append("clear")
+            clear_kwargs.update(kwargs)
 
     def fake_from_name(app_name, function_name):
         assert (app_name, function_name) == (
@@ -147,10 +155,16 @@ def test_shortmd_prep_node_runs_gromacs_prepare_and_returns_artifact(
         return FakePrepareFunction()
 
     monkeypatch.setattr(shortmd_workflow.modal.Function, "from_name", fake_from_name)
+    monkeypatch.setattr(
+        shortmd_workflow,
+        "clear_shortmd_gromacs_run",
+        FakeClearFunction(),
+    )
 
     node = ShortMDPrepNode(
         pdb_content=b"ATOM\n",
         run_name="../source",
+        overwrite_existing=True,
         gromacs=ShortMDGromacsSettings(
             simulation_time_ns=2,
             run_pdbfixer=True,
@@ -183,6 +197,8 @@ def test_shortmd_prep_node_runs_gromacs_prepare_and_returns_artifact(
         "gen_seed": 12,
         "genion_seed": 13,
     }
+    assert clear_kwargs == {"run_name": "source"}
+    assert events == ["clear", "prepare"]
     assert result.status == AppRunStatus.SUCCEEDED
     assert result.outputs[0].name == "prepared_gromacs_run"
     assert result.outputs[0].kind == ArtifactKind.DIRECTORY
@@ -522,6 +538,54 @@ def test_submit_shortmd_workflow_uses_included_orchestrator_class_boundary(
 
     assert "remote" not in calls
     assert calls["spawn"]["workflow"].name == "shortmd"
+    definition = calls["spawn"]["workflow"].validate()
+    prep_node = definition.nodes["prep-shortmd-run-alpha"].node
+    replicate_node = definition.nodes["replicate-shortmd-run-alpha-r001"].node
+
+    assert prep_node.run_name == "shortmd-run-alpha"
+    assert replicate_node.source_run_name == "shortmd-run-alpha"
+    assert replicate_node.replicate_run_name == "shortmd-run-alpha-r001"
     assert calls["spawn"]["run_id"] == "shortmd-run"
     assert calls["spawn"]["force"] is False
     assert calls["spawn"]["max_ready_workers"] == 3
+
+
+def test_submit_shortmd_workflow_propagates_force_to_gromacs_overwrite(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_dir = tmp_path / "pdbs"
+    input_dir.mkdir()
+    input_dir.joinpath("alpha.pdb").write_text("ATOM\n", encoding="utf-8")
+    calls = {}
+
+    class FakeOrchestratorMethod:
+        def spawn(self, **kwargs):
+            calls["spawn"] = kwargs
+            return "call-1"
+
+    class FakeWorkflowOrchestrator:
+        def __init__(self) -> None:
+            self.run = FakeOrchestratorMethod()
+
+    monkeypatch.setattr(
+        shortmd_workflow.orchestrator,
+        "WorkflowOrchestrator",
+        FakeWorkflowOrchestrator,
+    )
+
+    shortmd_workflow.submit_shortmd_workflow.info.raw_f(
+        input_dir=str(input_dir),
+        run_id="shortmd-run",
+        replicates=1,
+        force=True,
+        wait=False,
+    )
+
+    definition = calls["spawn"]["workflow"].validate()
+    prep_node = definition.nodes["prep-shortmd-run-alpha"].node
+    clone_node = definition.nodes["clone-shortmd-run-alpha-r001"].node
+
+    assert prep_node.overwrite_existing is True
+    assert clone_node.overwrite_clone is True
+    assert calls["spawn"]["force"] is True

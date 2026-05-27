@@ -106,6 +106,25 @@ class ShortMDGromacsSettings:
     timeout=CONF.timeout,
     volumes={GROMACS_OUTPUT_MOUNTPOINT: GROMACS_OUTPUT_VOLUME},
 )
+def clear_shortmd_gromacs_run(run_name: str) -> None:
+    """Remove one ShortMD-managed GROMACS run directory from the app volume."""
+    safe_run_name = sanitize_filename(run_name)
+    GROMACS_OUTPUT_VOLUME.reload()
+    run_dir = Path(GROMACS_OUTPUT_MOUNTPOINT) / safe_run_name
+    if run_dir.is_dir():
+        shutil.rmtree(run_dir)
+    elif run_dir.exists():
+        run_dir.unlink()
+    GROMACS_OUTPUT_VOLUME.commit()
+
+
+@app.function(
+    image=runtime_image,
+    cpu=0.125,
+    memory=(512, 4096),
+    timeout=CONF.timeout,
+    volumes={GROMACS_OUTPUT_MOUNTPOINT: GROMACS_OUTPUT_VOLUME},
+)
 def clone_prepared_shortmd_run(
     source_storage_path: str,
     source_run_name: str,
@@ -177,6 +196,7 @@ class ShortMDPrepNode(AppBackedNode):
 
     pdb_content: bytes
     run_name: str
+    overwrite_existing: bool = False
     gromacs: ShortMDGromacsSettings = field(default_factory=ShortMDGromacsSettings)
     app_name: str = GROMACS_APP_NAME
     prep_cpu_function_name: str = "prepare_tpr_cpu"
@@ -192,6 +212,8 @@ class ShortMDPrepNode(AppBackedNode):
             if self.gromacs.cpu_only
             else self.prep_gpu_function_name
         )
+        if self.overwrite_existing:
+            clear_shortmd_gromacs_run.remote(run_name=safe_run_name)
         app_function = modal.Function.from_name(self.app_name, prepare_function_name)
         remote_workdir = app_function.remote(
             pdb_content=self.pdb_content,
@@ -418,6 +440,7 @@ def discover_pdb_inputs(input_dir: str | Path) -> list[tuple[str, bytes]]:
 def build_shortmd_workflow(
     *,
     input_pdbs: list[tuple[str, bytes]],
+    run_namespace: str | None = None,
     replicates: int = 50,
     simulation_time_ns: int = 2,
     run_pdbfixer: bool = False,
@@ -428,11 +451,15 @@ def build_shortmd_workflow(
     gen_seed: int = -1,
     genion_seed: int = 0,
     max_parallel: int = 16,
+    overwrite_existing: bool = False,
 ) -> Workflow:
     """Build a ShortMD workflow DAG from local PDB payloads."""
     if replicates < 1:
         raise ValueError("replicates must be at least 1")
     workflow = Workflow("shortmd")
+    safe_run_namespace = (
+        sanitize_filename(run_namespace) if run_namespace is not None else None
+    )
     gromacs = ShortMDGromacsSettings(
         simulation_time_ns=simulation_time_ns,
         run_pdbfixer=run_pdbfixer,
@@ -447,7 +474,12 @@ def build_shortmd_workflow(
     replicate_handles = {}
 
     for file_name, pdb_content in input_pdbs:
-        run_name = sanitize_filename(Path(file_name).stem)
+        pdb_run_name = sanitize_filename(Path(file_name).stem)
+        run_name = (
+            f"{safe_run_namespace}-{pdb_run_name}"
+            if safe_run_namespace is not None
+            else pdb_run_name
+        )
         if run_name in used_run_names:
             raise ValueError(f"Duplicate sanitized PDB run name: {run_name}")
         used_run_names.add(run_name)
@@ -455,6 +487,7 @@ def build_shortmd_workflow(
             ShortMDPrepNode(
                 pdb_content=pdb_content,
                 run_name=run_name,
+                overwrite_existing=overwrite_existing,
                 gromacs=gromacs,
             ),
             id=f"prep-{run_name}",
@@ -465,6 +498,7 @@ def build_shortmd_workflow(
                 ShortMDCloneNode(
                     source_run_name=run_name,
                     replicate_run_name=replicate_run_name,
+                    overwrite_clone=overwrite_existing,
                 ),
                 id=f"clone-{replicate_run_name}",
                 inputs={"prepared": prep.outputs(kind=ArtifactKind.DIRECTORY)},
@@ -533,8 +567,10 @@ def submit_shortmd_workflow(
     """
     input_path = Path(input_dir).expanduser().resolve()
     input_pdbs = discover_pdb_inputs(input_path)
+    resolved_run_id = sanitize_filename(run_id or input_path.name)
     workflow = build_shortmd_workflow(
         input_pdbs=input_pdbs,
+        run_namespace=resolved_run_id,
         replicates=replicates,
         simulation_time_ns=simulation_time_ns,
         run_pdbfixer=run_pdbfixer,
@@ -545,8 +581,8 @@ def submit_shortmd_workflow(
         gen_seed=gen_seed,
         genion_seed=genion_seed,
         max_parallel=max_parallel,
+        overwrite_existing=force,
     )
-    resolved_run_id = sanitize_filename(run_id or input_path.name)
 
     orchestrator_handle = orchestrator.WorkflowOrchestrator()
     orchestrator_kwargs = {
