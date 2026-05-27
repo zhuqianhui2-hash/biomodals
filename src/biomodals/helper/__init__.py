@@ -35,7 +35,6 @@ def patch_image_for_helper(
 
     mods = [
         "biomodals.helper",
-        "biomodals.app.constant",
         "biomodals.app.config",
         "biomodals.schema",
     ]

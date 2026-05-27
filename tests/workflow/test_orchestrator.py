@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import pytest
 
+from biomodals.helper.constant import WORKFLOW_ORCHESTRATOR_VOLUME_NAME
 from biomodals.schema import AppRunResult, AppRunStatus
 from biomodals.workflow import Workflow
 from biomodals.workflow.core import orchestrator
@@ -97,7 +98,7 @@ def test_orchestrator_run_uses_runtime_from_definition(monkeypatch) -> None:
         "workflow_name": "demo",
         "workflow_definition": workflow,
         "volume_root": Path(orchestrator.CONF.output_volume_mountpoint),
-        "workflow_volume_name": "WorkflowOrchestrator-outputs",
+        "workflow_volume_name": WORKFLOW_ORCHESTRATOR_VOLUME_NAME,
         "workflow_volume": volume,
         "remote_node_runner": calls["remote_node_runner"],
         "remote_node_function_name": orchestrator.REMOTE_NODE_FUNCTION_NAME,
@@ -297,6 +298,7 @@ def test_runtime_from_definition_accepts_python_workflow(tmp_path: Path) -> None
 def test_orchestrator_modal_app_uses_python_313_runtime() -> None:
     assert orchestrator.CONF.python_version == "3.13"
     assert orchestrator.WorkflowOrchestrator is not None
+    assert orchestrator.OUT_VOLUME_NAME == WORKFLOW_ORCHESTRATOR_VOLUME_NAME
 
 
 def test_orchestrator_app_exposes_only_class_remote_surface() -> None:

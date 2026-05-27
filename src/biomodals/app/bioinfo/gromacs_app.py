@@ -17,8 +17,8 @@ from pathlib import Path, PurePosixPath
 import modal
 
 from biomodals.app.config import AppConfig
-from biomodals.app.constant import MAX_TIMEOUT
 from biomodals.helper import patch_image_for_helper
+from biomodals.helper.constant import MAX_TIMEOUT
 from biomodals.helper.shell import run_command
 
 ##########################################

@@ -36,8 +36,8 @@ from pathlib import Path
 import modal
 
 from biomodals.app.config import AppConfig
-from biomodals.app.constant import MAX_TIMEOUT, MODEL_VOLUME, MSA_CACHE_VOLUME
 from biomodals.helper import hash_string, patch_image_for_helper
+from biomodals.helper.constant import MAX_TIMEOUT, MODEL_VOLUME, MSA_CACHE_VOLUME
 from biomodals.helper.io import (
     build_local_output_path,
     resolve_local_output_dir,

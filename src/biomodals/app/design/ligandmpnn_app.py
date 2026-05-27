@@ -19,8 +19,8 @@ from typing import Any
 import modal
 
 from biomodals.app.config import AppConfig
-from biomodals.app.constant import MAX_TIMEOUT, MODEL_VOLUME
 from biomodals.helper import patch_image_for_helper
+from biomodals.helper.constant import MAX_TIMEOUT, MODEL_VOLUME
 from biomodals.helper.shell import (
     find_with_fd,
     package_outputs,

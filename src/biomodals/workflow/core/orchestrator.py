@@ -9,8 +9,12 @@ from typing import cast
 import modal
 
 from biomodals.app.config import AppConfig
-from biomodals.app.constant import MAX_TIMEOUT
 from biomodals.helper import patch_image_for_helper
+from biomodals.helper.constant import (
+    MAX_TIMEOUT,
+    WORKFLOW_ORCHESTRATOR_VOLUME,
+    WORKFLOW_ORCHESTRATOR_VOLUME_NAME,
+)
 from biomodals.schema import AppRunResult
 from biomodals.workflow.core.builder import Workflow
 from biomodals.workflow.core.nodes import NodeRunContext, WorkflowNode
@@ -24,8 +28,8 @@ CONF = AppConfig(
     python_version="3.13",
     timeout=int(os.environ.get("TIMEOUT", str(MAX_TIMEOUT))),
 )
-OUT_VOLUME = CONF.get_out_volume()
-OUT_VOLUME_NAME = f"{CONF.name}-outputs"
+OUT_VOLUME = WORKFLOW_ORCHESTRATOR_VOLUME
+OUT_VOLUME_NAME = WORKFLOW_ORCHESTRATOR_VOLUME_NAME
 REMOTE_NODE_FUNCTION_NAME = "run_node"
 
 runtime_image = patch_image_for_helper(

@@ -39,8 +39,8 @@ from pathlib import Path
 import modal
 
 from biomodals.app.config import AppConfig
-from biomodals.app.constant import MODEL_VOLUME
 from biomodals.helper import patch_image_for_helper
+from biomodals.helper.constant import MODEL_VOLUME
 from biomodals.helper.io import (
     build_local_output_path,
     resolve_local_output_dir,
@@ -110,17 +110,16 @@ OUT_VOLUME = CONF.get_out_volume()
 OUT_VOLUME_NAME = OUT_VOLUME.name or f"{CONF.name}-outputs"
 
 runtime_image = patch_image_for_helper(
-    modal.Image.debian_slim(python_version=CONF.python_version)
+    modal.Image
+    .debian_slim(python_version=CONF.python_version)
     .apt_install("git", "git-lfs", "build-essential")
     .env(CONF.default_env | {"GIT_LFS_SKIP_SMUDGE": "1"})
     .run_commands(
-        " && ".join(
-            (
-                f"git clone {CONF.repo_url} {CONF.git_clone_dir}",
-                f"cd {CONF.git_clone_dir}",
-                f"git checkout {CONF.repo_commit_hash}",
-            )
-        )
+        " && ".join((
+            f"git clone {CONF.repo_url} {CONF.git_clone_dir}",
+            f"cd {CONF.git_clone_dir}",
+            f"git checkout {CONF.repo_commit_hash}",
+        ))
     )
     .workdir(str(CONF.git_clone_dir))
     .uv_pip_install(

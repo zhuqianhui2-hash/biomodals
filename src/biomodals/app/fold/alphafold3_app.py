@@ -37,13 +37,13 @@ from uniaf3.schema.alphafold3 import (
 )
 
 from biomodals.app.config import AppConfig
-from biomodals.app.constant import (
+from biomodals.helper import hash_string, patch_image_for_helper
+from biomodals.helper.constant import (
     AF3_MSA_DB_VOLUME,
     MAX_TIMEOUT,
     MODEL_VOLUME,
     MSA_CACHE_VOLUME,
 )
-from biomodals.helper import hash_string, patch_image_for_helper
 from biomodals.helper.io import (
     build_local_output_path,
     resolve_local_output_dir,
