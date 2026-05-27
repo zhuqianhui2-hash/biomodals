@@ -20,6 +20,7 @@ from biomodals.schema import (
     WorkflowArtifact,
     WorkflowRun,
 )
+from biomodals.workflow.core import ledger as ledger_module
 from biomodals.workflow.core.ledger import LEDGER_TABLES, WorkflowLedger
 
 
@@ -74,6 +75,42 @@ def test_mark_run_status_updates_run_row(tmp_path: Path) -> None:
     with _connect(tmp_path) as conn:
         row = conn.execute("SELECT status FROM runs WHERE run_id = 'run-1'").fetchone()
     assert row["status"] == RunStatus.RUNNING
+
+
+def test_run_exists_closes_probe_connection(tmp_path: Path, monkeypatch) -> None:
+    ledger_path = tmp_path / "ppiflow" / "run-1" / "ledger.sqlite3"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.touch()
+
+    class FakeCursor:
+        def fetchone(self):
+            return (1,)
+
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+        def execute(self, sql, params):
+            return FakeCursor()
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = FakeConnection()
+    monkeypatch.setattr(
+        ledger_module.sqlite3,
+        "connect",
+        lambda path: connection,
+    )
+
+    assert WorkflowLedger(tmp_path).run_exists("ppiflow", "run-1")
+    assert connection.closed is True
 
 
 def test_node_attempt_app_result_and_artifacts_are_debuggable_with_sql(

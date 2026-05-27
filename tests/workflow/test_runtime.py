@@ -3,9 +3,9 @@
 # ruff: noqa: D101,D102,D103,D107
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Barrier, BrokenBarrierError
+from threading import Barrier, BrokenBarrierError, Event, Thread
 
 import pytest
 from pydantic import BaseModel, Field
@@ -102,6 +102,7 @@ class FakeRemoteCall:
         self.on_get = on_get
         self.effects = effects or []
         self.get_timeouts: list[float | int | None] = []
+        self.cancel_calls: list[bool] = []
 
     def get(self, timeout=None):
         self.get_timeouts.append(timeout)
@@ -113,6 +114,9 @@ class FakeRemoteCall:
                 raise effect
             return effect
         return self.result
+
+    def cancel(self, terminate_containers: bool = False) -> None:
+        self.cancel_calls.append(terminate_containers)
 
 
 class FakeVolume:
@@ -150,6 +154,14 @@ class ConfiguredNode(WorkflowNativeNode):
 @dataclass
 class BytesConfiguredNode(WorkflowNativeNode):
     payload: bytes
+
+    def run(self, context):
+        return AppRunResult(status=AppRunStatus.SUCCEEDED)
+
+
+@dataclass
+class RuntimeHandleNode(WorkflowNativeNode):
+    handle: object = field(metadata={"dag_hash": False})
 
     def run(self, context):
         return AppRunResult(status=AppRunStatus.SUCCEEDED)
@@ -362,6 +374,59 @@ def test_single_node_exception_marks_node_and_run_failed(tmp_path: Path) -> None
     assert "RuntimeError: fail exploded" in status.error
 
 
+def test_runtime_logs_dag_and_node_state_transitions(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workflow = Workflow("demo")
+    first = workflow.add_node(FakeNode(), id="prepare")
+    workflow.add_node(FakeNode(), id="produce", depends_on=[first])
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+    )
+
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.SUCCEEDED
+    stdout = capsys.readouterr().out
+    assert "[workflow] Starting workflow 'demo' run 'run-1'" in stdout
+    assert "[workflow] DAG graph:" in stdout
+    assert "[workflow]   prepare" in stdout
+    assert "[workflow]   produce" in stdout
+    assert "<- prepare" in stdout
+    assert "[workflow] Node started: prepare attempt=attempt-1" in stdout
+    assert "[workflow] Node succeeded: prepare attempt=attempt-1" in stdout
+    assert "[workflow] Node started: produce attempt=attempt-1" in stdout
+    assert "[workflow] Node succeeded: produce attempt=attempt-1" in stdout
+
+
+def test_runtime_logs_failed_node_transition(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(
+        FakeNode(result=AppRunResult(status=AppRunStatus.FAILED)),
+        id="fail",
+    )
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+    )
+
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.FAILED
+    stdout = capsys.readouterr().out
+    assert "[workflow] Node started: fail attempt=attempt-1" in stdout
+    assert "[workflow] Node failed: fail attempt=attempt-1" in stdout
+
+
 def test_runtime_dag_hash_uses_stable_json_for_dataclass_node_config() -> None:
     first_workflow = Workflow("demo")
     first_workflow.add_node(
@@ -412,6 +477,17 @@ def test_runtime_dag_hash_supports_bytes_in_dataclass_node_config() -> None:
 
     assert first_hash != second_hash
     assert first_hash == repeated_hash
+
+
+def test_runtime_dag_hash_skips_dataclass_fields_marked_excluded() -> None:
+    first_workflow = Workflow("demo")
+    first_workflow.add_node(RuntimeHandleNode(handle=object()), id="node")
+    second_workflow = Workflow("demo")
+    second_workflow.add_node(RuntimeHandleNode(handle=object()), id="node")
+
+    assert WorkflowRuntime._dag_hash(first_workflow.validate()) == (
+        WorkflowRuntime._dag_hash(second_workflow.validate())
+    )
 
 
 def test_running_node_without_recoverable_call_is_not_duplicated(
@@ -612,6 +688,60 @@ def test_remote_call_failure_after_timeout_is_recorded(tmp_path: Path) -> None:
             "SELECT status, error FROM remote_calls WHERE call_id = 'fc-fail'"
         ).fetchone()
     assert row == ("failed", "remote exploded")
+
+
+def test_runtime_cleanup_cancels_in_flight_remote_function_call(
+    tmp_path: Path,
+) -> None:
+    workflow = Workflow("demo")
+    workflow.add_node(RemoteOnlyNode(), id="remote")
+    waiting_for_result = Event()
+    release_result = Event()
+
+    class BlockingRemoteCall(FakeRemoteCall):
+        def get(self, timeout=None):
+            self.get_timeouts.append(timeout)
+            if timeout == 0:
+                raise TimeoutError()
+            waiting_for_result.set()
+            release_result.wait(timeout=2)
+            raise RuntimeError("cancelled after cleanup")
+
+        def cancel(self, terminate_containers: bool = False) -> None:
+            super().cancel(terminate_containers=terminate_containers)
+            release_result.set()
+
+    remote_call = BlockingRemoteCall(
+        object_id="fc-blocking",
+        result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+    )
+
+    def remote_runner(node, context):
+        return remote_call
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+        remote_node_runner=remote_runner,
+    )
+    results: list[AppRunResult] = []
+    thread = Thread(
+        target=lambda: results.append(runtime.run(run_id="run-1")),
+        daemon=True,
+    )
+    thread.start()
+
+    assert waiting_for_result.wait(timeout=2)
+    try:
+        runtime.cancel_active_remote_calls(terminate_containers=True)
+    finally:
+        release_result.set()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert remote_call.cancel_calls == [True]
+    assert results[0].status == AppRunStatus.FAILED
 
 
 def test_remote_success_records_app_result_before_succeeded_status(

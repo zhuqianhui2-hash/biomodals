@@ -2,7 +2,7 @@
 
 import importlib
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -69,6 +69,35 @@ def get_catalog(
             )
         case _:
             raise ValueError(f"Unknown catalog type: {catalog_type}")
+
+
+def include_dependency_apps(app: modal.App, dependencies: Iterable[str]) -> modal.App:
+    """Include catalog app definitions into an existing Modal app."""
+    all_apps = get_catalog("app", use_absolute_paths=True)
+    for dependency in dependencies:
+        dependency_metadata = BiomodalsApp(dependency, all_apps=all_apps)
+        dependency_module = importlib.import_module(dependency_metadata.module)
+        dependency_app = getattr(dependency_module, "app", None)
+        if not isinstance(dependency_app, modal.App):
+            raise TypeError(
+                f"Dependency app '{dependency}' does not expose a modal.App named app"
+            )
+
+        function_collisions = set(app._local_state.functions) & set(
+            dependency_app._local_state.functions
+        )
+        class_collisions = set(app._local_state.classes) & set(
+            dependency_app._local_state.classes
+        )
+        duplicate_tags = sorted(function_collisions | class_collisions)
+        if duplicate_tags:
+            duplicate_list = ", ".join(duplicate_tags)
+            raise ValueError(
+                f"Dependency app '{dependency}' has Modal tag collisions: "
+                f"{duplicate_list}"
+            )
+        app.include(dependency_app, inherit_tags=False)
+    return app
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,14 @@
 
 # ruff: noqa: D103
 
-from biomodals.helper.catalog import BiomodalsApp, get_catalog
+from pathlib import Path
+from types import SimpleNamespace
+
+import modal
+import pytest
+
+from biomodals.helper import catalog
+from biomodals.helper.catalog import BiomodalsApp, get_catalog, include_dependency_apps
 
 
 def test_default_catalog_does_not_collect_workflows() -> None:
@@ -38,3 +45,71 @@ def test_workflow_file_resolves_to_workflow_module_with_natural_name() -> None:
 
     assert app.module == "biomodals.workflow.ppiflow_workflow"
     assert app.category == "workflow"
+
+
+def test_include_dependency_apps_resolves_catalog_app_and_includes_modal_app(
+    monkeypatch,
+) -> None:
+    workflow_app = modal.App("workflow")
+    dependency_app = modal.App("dependency")
+
+    @dependency_app.function(name="dependency_function", serialized=True)
+    def dependency_function() -> None:
+        return None
+
+    class FakeBiomodalsApp:
+        def __init__(self, app_name_or_path: str, all_apps: dict[str, Path]) -> None:
+            assert app_name_or_path == "dependency"
+            assert all_apps == {"dependency": Path("/apps/dependency_app.py")}
+            self.module = "fake.dependency_app"
+
+    monkeypatch.setattr(
+        catalog,
+        "get_catalog",
+        lambda catalog_type, *, use_absolute_paths=False, cwd=None: {
+            "dependency": Path("/apps/dependency_app.py")
+        },
+    )
+    monkeypatch.setattr(catalog, "BiomodalsApp", FakeBiomodalsApp)
+    monkeypatch.setattr(
+        catalog.importlib,
+        "import_module",
+        lambda module_name: SimpleNamespace(app=dependency_app),
+    )
+
+    assert include_dependency_apps(workflow_app, ("dependency",)) is workflow_app
+    assert "dependency_function" in workflow_app._local_state.functions
+
+
+def test_include_dependency_apps_rejects_duplicate_modal_tags(monkeypatch) -> None:
+    workflow_app = modal.App("workflow")
+    dependency_app = modal.App("dependency")
+
+    @workflow_app.function(name="duplicate_function", serialized=True)
+    def workflow_duplicate_function() -> None:
+        return None
+
+    @dependency_app.function(name="duplicate_function", serialized=True)
+    def dependency_duplicate_function() -> None:
+        return None
+
+    class FakeBiomodalsApp:
+        def __init__(self, app_name_or_path: str, all_apps: dict[str, Path]) -> None:
+            self.module = "fake.dependency_app"
+
+    monkeypatch.setattr(
+        catalog,
+        "get_catalog",
+        lambda catalog_type, *, use_absolute_paths=False, cwd=None: {
+            "dependency": Path("/apps/dependency_app.py")
+        },
+    )
+    monkeypatch.setattr(catalog, "BiomodalsApp", FakeBiomodalsApp)
+    monkeypatch.setattr(
+        catalog.importlib,
+        "import_module",
+        lambda module_name: SimpleNamespace(app=dependency_app),
+    )
+
+    with pytest.raises(ValueError, match="duplicate_function"):
+        include_dependency_apps(workflow_app, ("dependency",))

@@ -27,6 +27,7 @@ class AppConfig(BaseModel):
     version: str | None = None
     python_version: str | None = None
     tags: dict[str, str] | None = None
+    depends_on_apps: tuple[str, ...] = ()
 
     # Runtime configs
     # Model GPU (https://modal.com/docs/guide/gpu)

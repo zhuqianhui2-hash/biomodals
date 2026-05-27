@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import fields, is_dataclass
 from enum import Enum
 from pathlib import Path
+from threading import RLock
 from typing import Protocol
 
 import orjson
@@ -85,6 +86,8 @@ class WorkflowRuntime:
         self.max_ready_workers = max_ready_workers
         self.ledger = WorkflowLedger(self.volume_root)
         self.executed_waves: list[list[str]] = []
+        self._active_remote_calls: dict[str, RemoteFunctionCall] = {}
+        self._active_remote_calls_lock = RLock()
 
     @classmethod
     def from_definition(
@@ -127,6 +130,23 @@ class WorkflowRuntime:
         """Run the workflow until every node succeeds or no progress is possible."""
         definition = self.workflow.validate()
         dag_hash = self._dag_hash(definition)
+        print(
+            f"[workflow] Starting workflow '{definition.name}' run '{run_id}' "
+            f"with {len(definition.nodes)} node(s)",
+            flush=True,
+        )
+        print("[workflow] DAG graph:", flush=True)
+        for node_id, spec in definition.nodes.items():
+            dependencies = sorted(definition.dependencies[node_id])
+            dependency_text = ", ".join(dependencies) if dependencies else "-"
+            node_class = (
+                f"{spec.node.__class__.__module__}.{spec.node.__class__.__qualname__}"
+            )
+            print(
+                f"[workflow]   {node_id} "
+                f"[{spec.node.placement.value}; {node_class}] <- {dependency_text}",
+                flush=True,
+            )
         self._reload_volume()
         run_exists = self.ledger.run_exists(definition.name, run_id)
         if run_exists and force:
@@ -244,6 +264,10 @@ class WorkflowRuntime:
                     error = "".join(
                         traceback.format_exception(type(exc), exc, exc.__traceback__)
                     )
+                    print(
+                        f"[workflow] Node failed: {node_id}: {exc}",
+                        flush=True,
+                    )
                     self.ledger.mark_node_failed(node_id, error)
                     self._commit_volume()
                     results.append((
@@ -282,6 +306,11 @@ class WorkflowRuntime:
             execution_policy=spec.node.execution_policy,
             placement=spec.node.placement,
         )
+        print(
+            f"[workflow] Node started: {node_id} attempt={attempt_id} "
+            f"placement={spec.node.placement.value}",
+            flush=True,
+        )
         self.ledger.record_node_inputs(node_id, inputs)
         attempt = self.ledger.record_attempt_started(node_id, attempt_id)
         attempt_dir = self._attempt_dir(attempt)
@@ -316,6 +345,11 @@ class WorkflowRuntime:
     ) -> AppRunResult:
         self.ledger.record_app_result(node_id, attempt_id, result)
         if result.status in {AppRunStatus.FAILED, AppRunStatus.PARTIAL}:
+            print(
+                f"[workflow] Node failed: {node_id} attempt={attempt_id}: "
+                f"{self._node_error_message(result)}",
+                flush=True,
+            )
             if result.logs:
                 log_artifacts = materialize_app_run_result(
                     result=AppRunResult(status=result.status, logs=result.logs),
@@ -356,6 +390,11 @@ class WorkflowRuntime:
             result=result,
         )
         self._commit_volume()
+        print(
+            f"[workflow] Node succeeded: {node_id} attempt={attempt_id} "
+            f"artifacts={len(artifacts)}",
+            flush=True,
+        )
         return result
 
     def _resolve_inputs(
@@ -392,17 +431,67 @@ class WorkflowRuntime:
             return remote_result
 
         call_id = str(remote_result.object_id)
-        self.ledger.record_remote_call(
-            call_id=call_id,
-            node_id=context.node_id,
-            attempt_id=context.attempt_id,
-            function_name=self._remote_function_name(node),
-            call_kind="node",
+        with self._active_remote_calls_lock:
+            self._active_remote_calls[call_id] = remote_result
+        try:
+            self.ledger.record_remote_call(
+                call_id=call_id,
+                node_id=context.node_id,
+                attempt_id=context.attempt_id,
+                function_name=self._remote_function_name(node),
+                call_kind="node",
+            )
+            self._commit_volume()
+            result = self._collect_remote_call(call_id, remote_result)
+            self._reload_volume()
+            return result
+        finally:
+            with self._active_remote_calls_lock:
+                self._active_remote_calls.pop(call_id, None)
+
+    def cancel_active_remote_calls(self, *, terminate_containers: bool = True) -> None:
+        """Cancel Modal function calls spawned by this runtime instance."""
+        with self._active_remote_calls_lock:
+            active_remote_calls = dict(self._active_remote_calls)
+        if not active_remote_calls:
+            return
+
+        print(
+            "[workflow] Cancelling "
+            f"{len(active_remote_calls)} in-flight remote call(s)",
+            flush=True,
         )
-        self._commit_volume()
-        result = self._collect_remote_call(call_id, remote_result)
-        self._reload_volume()
-        return result
+        for call_id, function_call in active_remote_calls.items():
+            cancel = getattr(function_call, "cancel", None)
+            if cancel is None:
+                print(
+                    f"[workflow] Remote call cannot be cancelled: {call_id}",
+                    flush=True,
+                )
+                continue
+            try:
+                cancel(terminate_containers=terminate_containers)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[workflow] Remote call cancellation failed: {call_id}: {exc}",
+                    flush=True,
+                )
+                continue
+
+            print(f"[workflow] Remote call cancelled: {call_id}", flush=True)
+            try:
+                self.ledger.mark_remote_call_status(
+                    call_id,
+                    "cancelled",
+                    completed=True,
+                )
+                self._commit_volume()
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    "[workflow] Remote call cancellation status could not be "
+                    f"recorded: {call_id}: {exc}",
+                    flush=True,
+                )
 
     def _recover_remote_node_if_possible(self, node_id: str) -> AppRunResult | None:
         succeeded_call = self.ledger.latest_remote_call(
@@ -597,6 +686,7 @@ class WorkflowRuntime:
                     getattr(value, field.name)
                 )
                 for field in fields(value)
+                if field.metadata.get("dag_hash") is not False
             }
         if isinstance(value, Mapping):
             return {

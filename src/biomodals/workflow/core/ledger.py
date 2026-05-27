@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import sqlite3
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
@@ -111,7 +111,7 @@ class WorkflowLedger:
         if not ledger_path.exists():
             return False
         try:
-            with sqlite3.connect(ledger_path) as conn:
+            with closing(sqlite3.connect(ledger_path)) as conn:
                 row = conn.execute(
                     "SELECT 1 FROM runs WHERE run_id = ? LIMIT 1",
                     (run_id,),

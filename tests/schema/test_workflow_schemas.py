@@ -67,6 +67,13 @@ def test_app_config_validates_source_reproducibility_and_runtime_bounds() -> Non
     assert _valid_app_config(timeout=999_999).timeout == 86_400
 
 
+def test_app_config_records_dependency_apps_without_modal_imports() -> None:
+    assert _valid_app_config().depends_on_apps == ()
+    assert _valid_app_config(depends_on_apps=["gromacs"]).depends_on_apps == (
+        "gromacs",
+    )
+
+
 def test_schema_modules_do_not_import_modal_app_or_workflow_packages() -> None:
     schema_dir = Path(__file__).parents[2] / "src" / "biomodals" / "schema"
     banned_import_roots = {"modal"}
