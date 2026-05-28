@@ -254,6 +254,38 @@ Use Modal's module mode for workflow runs, for example
 `python -m modal run -m biomodals.workflow.shortmd_workflow::submit_shortmd_workflow`,
 so local and remote containers agree on workflow node class module names.
 
+## Workflow App Composition
+
+Workflow scripts should compose every Modal app they need at import time. Define
+dependency app names once on `AppConfig.depends_on_apps`, mirror that list into
+`CONF.tags["depends_on"]` for Modal UI visibility, and call
+`include_dependency_apps(app, CONF.depends_on_apps)` after including the shared
+orchestrator app.
+
+```python
+DEPENDENCY_APPS = ("gromacs",)
+CONF = AppConfig(
+    name="ShortMDWorkflow",
+    depends_on_apps=DEPENDENCY_APPS,
+    tags={"depends_on": ",".join(DEPENDENCY_APPS)},
+)
+
+app = modal.App(CONF.name, image=runtime_image, tags=CONF.tags).include(
+    orchestrator.app, inherit_tags=True
+)
+app = include_dependency_apps(app, CONF.depends_on_apps)
+```
+
+`depends_on_apps` is a composition declaration, not a deployment command. Do not
+auto-deploy dependency apps from workflow submission paths. Including dependency
+apps gives the workflow access to hydrated Modal functions and classes while
+letting Modal reuse normal image caching behavior.
+
+Import dependency app modules directly for app metadata, Modal function handles,
+volume objects, volume names, and mountpoints. Do not duplicate volume names,
+mount paths, or app function names as workflow-local string constants when the
+source app exports them.
+
 ## App Interfaces
 
 Local entrypoints stay CLI-only. They parse local paths, submit remote work,
@@ -263,27 +295,99 @@ Workflow reuse happens through workflow-compatible remote app functions. These
 functions may reuse behavior from local entrypoints or existing remote
 functions, but they return `AppRunResult` and avoid local filesystem UX.
 
-App-backed workflow nodes either define `app_name` and `function_name` so the
-runtime can lazily import `modal.Function.from_name(...)`, or override
-`load_app_function()`. They should override `build_app_function_kwargs()` to
-translate `NodeRunContext.inputs` into the app function's primitive or Pydantic
-arguments.
+For new Biomodals workflows that depend on other Biomodals apps, prefer
+included-app Modal handles over deployed-app lookup strings. Avoid
+`modal.Function.from_name(...)` in workflow definitions when the dependency app
+can be included; remote orchestrator containers can otherwise re-import the
+workflow module and see unhydrated function globals. Use deployed-app lookup only
+for legacy workflows or external apps that cannot be composed into the workflow
+app, and document that reason near the node.
 
-`load_app_function()` and any stored app function reference should be typed as
-`modal.Function`. An app-backed node is not expected to call a regular Python
-`Callable`; unit tests may use fakes at the Modal boundary, but production node
-contracts should stay Modal-function based.
+When nodes need included Modal functions or classes, group those hydrated
+objects in a small workflow-local dataclass named `*ModalNamespace`. Type the
+fields as `modal.Function` or `modal.Cls`; avoid overly generic callable
+protocols. Store the namespace on nodes as runtime-only state:
 
-Prefer `AppBackedNode` for workflow nodes whose primary job is to invoke a
-deployed app function. App-backed nodes store app names, function names, and
-primitive or Pydantic arguments; they must not store hydrated Modal function
-handles. This keeps workflow DAGs portable across local and remote containers
-and avoids making reusable workflows responsible for Modal object hydration.
-Workflow definitions should reuse app functions whenever possible. Add
+```python
+@dataclass(frozen=True)
+class ShortMDModalNamespace:
+    prepare_gpu: modal.Function
+    production_gpu: modal.Function
+
+
+@dataclass
+class ShortMDPrepNode(AppBackedNode):
+    modal_namespace: ShortMDModalNamespace = field(
+        repr=False,
+        compare=False,
+        metadata={"dag_hash": False},
+    )
+```
+
+The namespace is allowed to cross the orchestrator boundary because it contains
+Modal objects from apps included into the workflow app. Excluding it from the
+DAG hash keeps retry and resume behavior tied to semantic workflow inputs rather
+than runtime hydration objects.
+
+Prefer `AppBackedNode` for nodes whose primary job is to invoke app functions.
+Workflow definitions should reuse existing app functions whenever possible. Add
 `WorkflowNativeNode` implementations only when the source app lacks a needed
 function or when workflow-specific adapters are required to transform artifacts
 between apps. Use native nodes for lightweight transforms, selectors, summaries,
-and file-management glue that are not app function invocations.
+and file-management glue that is not part of the source app's standalone
+contract.
+
+If a workflow-native adapter needs a remote Modal boundary, define a top-level
+`@app.function` in the workflow module and put that hydrated function in the
+workflow's `*ModalNamespace`. Do not try to make ordinary node methods remote
+Modal methods; node methods are plain Python methods unless the node itself is a
+Modal `@app.cls`, which is not the generic workflow-node model.
+
+Keep workflow-specific file cloning, cleanup, and adapter logic in workflow
+scripts, not in app modules, when the standalone app does not require that
+behavior. Conversely, if a function is useful to the app outside workflows, add
+it to the app and preserve the app's existing standalone local entrypoints.
+
+Group repeated app arguments in a compact workflow settings dataclass when that
+keeps node constructors readable. Avoid extracting trivial two- or three-line
+helpers that are used once or twice; inline those operations with a comment if
+the intent is not obvious.
+
+## Volumes And Artifacts
+
+Workflows that import multiple apps should treat each app's volume metadata as
+owned by that app. Import volume handles, volume names, and mountpoints from the
+source app module rather than hardcoding them in the workflow.
+
+When an app function returns an absolute path under its mounted volume, convert
+that path to workflow storage with
+`biomodals.helper.volume_run.volume_path_from_mount_path(...)`. The helper takes
+`str` inputs and returns a single validated `VolumePath`; do not construct a
+`VolumePath` only to extract `.path` and wrap it again.
+
+Workflow-native remote functions that mutate mounted volumes must call
+`reload()` before reading data written by other containers and `commit()` after
+writing, copying, or deleting files. Validate artifact storage paths with
+`VolumePath` before joining them to mounted paths.
+
+## DAG Construction
+
+Build workflow DAGs locally from already-staged primitive data or Pydantic
+models. Discover local inputs before DAG construction, sanitize user-derived
+identifiers with `sanitize_filename`, and reject duplicate sanitized names. Use
+stable node ids derived from sanitized names and deterministic indices so
+resume, force, and ledger debugging stay predictable.
+
+Use static fan-out when the input cardinality is known at submission time. For
+example, create one prep node per input, one clone node per replicate, one
+production node per clone, and a final summary node that depends on all
+production outputs. Keep per-run namespace prefixes explicit when the same input
+filenames may appear across workflow runs.
+
+Summary/report nodes should usually be `WorkflowNativeNode` instances with
+`ORCHESTRATOR` placement when they only aggregate manifests or emit text
+reports. Return reports as UTF-8 `InlineBytes`; return binary files,
+directories, and archives as durable `VolumePath` outputs.
 
 When adding a workflow-compatible app function, keep existing local entrypoint
 behavior unchanged and add a focused pytest contract test that does not call
@@ -297,3 +401,13 @@ Use pytest for non-Modal tests. Tests must not call `.remote()`, `.spawn()`,
 `modal.Function.from_name(...)`, real `modal.Queue`, real `modal.Volume`, or
 deployed Modal apps. Mock Modal boundaries with fake objects and deterministic
 `AppRunResult` or `WorkflowArtifact` payloads.
+
+For included-app workflows, tests should assert that the workflow app declares
+the expected `depends_on_apps`, composes dependency apps through
+`include_dependency_apps`, and imports app-owned volume metadata instead of
+hardcoding it. Patch `modal.Function.from_name` to fail in tests that exercise
+new included-app nodes so accidental deployed-app lookup regressions are caught.
+
+Use fake Modal namespace objects at node boundaries. Cast those fakes to
+`modal.Function` or `modal.Cls` in tests when needed to satisfy static typing;
+the production node contract should remain Modal-object based.

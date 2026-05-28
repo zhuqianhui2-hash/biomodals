@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import shutil
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import modal
 
@@ -23,6 +23,7 @@ from biomodals.helper import patch_image_for_helper
 from biomodals.helper.catalog import include_dependency_apps
 from biomodals.helper.constant import MAX_TIMEOUT
 from biomodals.helper.shell import sanitize_filename
+from biomodals.helper.volume_run import volume_path_from_mount_path
 from biomodals.schema import (
     AppConfig,
     AppOutput,
@@ -66,25 +67,6 @@ GROMACS_OUTPUT_VOLUME_NAME = gromacs_app.OUTPUTS_VOLUME_NAME
 GROMACS_OUTPUT_MOUNTPOINT = gromacs_app.CONF.output_volume_mountpoint
 
 
-def _gromacs_volume_path_from_workdir(remote_workdir: object) -> str:
-    """Return the volume-relative path for a GROMACS app work directory."""
-    mount_root = PurePosixPath(GROMACS_OUTPUT_MOUNTPOINT)
-    remote_path = PurePosixPath(str(remote_workdir))
-    try:
-        relative_path = remote_path.relative_to(mount_root)
-    except ValueError as exc:
-        raise ValueError(
-            f"GROMACS work directory is outside {GROMACS_OUTPUT_MOUNTPOINT}: "
-            f"{remote_workdir}"
-        ) from exc
-    if str(relative_path) == ".":
-        raise ValueError("GROMACS work directory must be below the output mount root")
-    return VolumePath(
-        volume_name=GROMACS_OUTPUT_VOLUME_NAME,
-        path=str(relative_path),
-    ).path
-
-
 @dataclass(frozen=True)
 class ShortMDGromacsSettings:
     """Shared GROMACS arguments for ShortMD prep and production nodes."""
@@ -102,16 +84,16 @@ class ShortMDGromacsSettings:
 
 
 @dataclass(frozen=True)
-class ShortMDModalFunctions:
-    """Hydrated Modal functions carried across the orchestrator boundary."""
+class ShortMDModalNamespace:
+    """Hydrated Modal objects carried across the orchestrator boundary."""
 
-    clear: object
-    clone: object
-    prepare_cpu: object
-    prepare_gpu: object
-    production_cpu: object
-    production_gpu: object
-    collect_stats: object
+    clear: modal.Function
+    clone: modal.Function
+    prepare_cpu: modal.Function
+    prepare_gpu: modal.Function
+    production_cpu: modal.Function
+    production_gpu: modal.Function
+    collect_stats: modal.Function
 
 
 @app.function(
@@ -211,7 +193,7 @@ class ShortMDPrepNode(AppBackedNode):
 
     pdb_content: bytes
     run_name: str
-    modal_functions: ShortMDModalFunctions = field(
+    modal_namespace: ShortMDModalNamespace = field(
         repr=False,
         compare=False,
         metadata={"dag_hash": False},
@@ -225,11 +207,11 @@ class ShortMDPrepNode(AppBackedNode):
         """Run GROMACS prep and return a workflow artifact for the run directory."""
         safe_run_name = sanitize_filename(self.run_name)
         if self.overwrite_existing:
-            self.modal_functions.clear.remote(run_name=safe_run_name)
+            self.modal_namespace.clear.remote(run_name=safe_run_name)
         app_function = (
-            self.modal_functions.prepare_cpu
+            self.modal_namespace.prepare_cpu
             if self.gromacs.cpu_only
-            else self.modal_functions.prepare_gpu
+            else self.modal_namespace.prepare_gpu
         )
         remote_workdir = app_function.remote(
             pdb_content=self.pdb_content,
@@ -248,9 +230,10 @@ class ShortMDPrepNode(AppBackedNode):
                 AppOutput(
                     name="prepared_gromacs_run",
                     kind=ArtifactKind.DIRECTORY,
-                    storage=VolumePath(
+                    storage=volume_path_from_mount_path(
+                        remote_path=str(remote_workdir),
+                        mount_root=GROMACS_OUTPUT_MOUNTPOINT,
                         volume_name=GROMACS_OUTPUT_VOLUME_NAME,
-                        path=_gromacs_volume_path_from_workdir(remote_workdir),
                     ),
                     metadata={"stage": "prep", "run_name": safe_run_name},
                 )
@@ -264,7 +247,7 @@ class ShortMDCloneNode(WorkflowNativeNode):
 
     source_run_name: str
     replicate_run_name: str
-    modal_functions: ShortMDModalFunctions = field(
+    modal_namespace: ShortMDModalNamespace = field(
         repr=False,
         compare=False,
         metadata={"dag_hash": False},
@@ -290,7 +273,7 @@ class ShortMDCloneNode(WorkflowNativeNode):
             str(prepared_artifact.metadata.get("run_name") or self.source_run_name)
         )
         safe_replicate_run_name = sanitize_filename(self.replicate_run_name)
-        remote_workdir = self.modal_functions.clone.remote(
+        remote_workdir = self.modal_namespace.clone.remote(
             source_storage_path=prepared_artifact.storage.path,
             source_run_name=safe_source_run_name,
             replicate_run_name=safe_replicate_run_name,
@@ -302,9 +285,10 @@ class ShortMDCloneNode(WorkflowNativeNode):
                 AppOutput(
                     name="cloned_gromacs_run",
                     kind=ArtifactKind.DIRECTORY,
-                    storage=VolumePath(
+                    storage=volume_path_from_mount_path(
+                        remote_path=str(remote_workdir),
+                        mount_root=GROMACS_OUTPUT_MOUNTPOINT,
                         volume_name=GROMACS_OUTPUT_VOLUME_NAME,
-                        path=_gromacs_volume_path_from_workdir(remote_workdir),
                     ),
                     metadata={
                         "stage": "clone",
@@ -322,7 +306,7 @@ class ShortMDReplicateNode(AppBackedNode):
 
     source_run_name: str
     replicate_run_name: str
-    modal_functions: ShortMDModalFunctions = field(
+    modal_namespace: ShortMDModalNamespace = field(
         repr=False,
         compare=False,
         metadata={"dag_hash": False},
@@ -351,9 +335,9 @@ class ShortMDReplicateNode(AppBackedNode):
             str(cloned_artifact.metadata.get("run_name") or self.replicate_run_name)
         )
         app_function = (
-            self.modal_functions.production_cpu
+            self.modal_namespace.production_cpu
             if self.gromacs.cpu_only
-            else self.modal_functions.production_gpu
+            else self.modal_namespace.production_gpu
         )
         _ = app_function.remote(
             run_name=safe_replicate_run_name,
@@ -361,7 +345,7 @@ class ShortMDReplicateNode(AppBackedNode):
             num_threads=self.gromacs.num_threads,
             use_openmp_threads=self.gromacs.use_openmp_threads,
         )
-        remote_workdir = self.modal_functions.collect_stats.remote(
+        remote_workdir = self.modal_namespace.collect_stats.remote(
             "production_",
             run_name=safe_replicate_run_name,
             save_processed_traj=self.gromacs.save_processed_traj,
@@ -373,9 +357,10 @@ class ShortMDReplicateNode(AppBackedNode):
                 AppOutput(
                     name="gromacs_production",
                     kind=ArtifactKind.DIRECTORY,
-                    storage=VolumePath(
+                    storage=volume_path_from_mount_path(
+                        remote_path=str(remote_workdir),
+                        mount_root=GROMACS_OUTPUT_MOUNTPOINT,
                         volume_name=GROMACS_OUTPUT_VOLUME_NAME,
-                        path=_gromacs_volume_path_from_workdir(remote_workdir),
                     ),
                     metadata={
                         "stage": "production",
@@ -487,7 +472,7 @@ def build_shortmd_workflow(
         gen_seed=gen_seed,
         genion_seed=genion_seed,
     )
-    modal_functions = ShortMDModalFunctions(
+    modal_namespace = ShortMDModalNamespace(
         clear=clear_shortmd_gromacs_run,
         clone=clone_prepared_shortmd_run,
         prepare_cpu=gromacs_app.prepare_tpr_cpu,
@@ -513,7 +498,7 @@ def build_shortmd_workflow(
             ShortMDPrepNode(
                 pdb_content=pdb_content,
                 run_name=run_name,
-                modal_functions=modal_functions,
+                modal_namespace=modal_namespace,
                 overwrite_existing=overwrite_existing,
                 gromacs=gromacs,
             ),
@@ -525,7 +510,7 @@ def build_shortmd_workflow(
                 ShortMDCloneNode(
                     source_run_name=run_name,
                     replicate_run_name=replicate_run_name,
-                    modal_functions=modal_functions,
+                    modal_namespace=modal_namespace,
                     overwrite_clone=overwrite_existing,
                 ),
                 id=f"clone-{replicate_run_name}",
@@ -535,7 +520,7 @@ def build_shortmd_workflow(
                 ShortMDReplicateNode(
                     source_run_name=run_name,
                     replicate_run_name=replicate_run_name,
-                    modal_functions=modal_functions,
+                    modal_namespace=modal_namespace,
                     gromacs=gromacs,
                 ),
                 id=f"replicate-{replicate_run_name}",
