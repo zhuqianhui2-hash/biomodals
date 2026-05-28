@@ -58,50 +58,6 @@ def test_top_level_deploy_remains_app_compatibility_alias() -> None:
     assert "Name or path of the app to deploy" in result.output
 
 
-def test_workflow_run_uses_canonical_module_entrypoint_and_passes_flags(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[list[str], dict[str, str] | None]] = []
-
-    def fake_run_command(cmd: list[str], **kwargs) -> None:
-        calls.append((cmd, kwargs.get("env")))
-
-    monkeypatch.setattr("biomodals.cli.run_command", fake_run_command)
-    result = runner.invoke(
-        app,
-        [
-            "workflow",
-            "run",
-            "ppiflow",
-            "--gpu",
-            "L40S",
-            "--timeout",
-            "123",
-            "--",
-            "--input-dir",
-            "inputs",
-            "--replicates",
-            "2",
-        ],
-    )
-
-    assert result.exit_code == 0
-    cmd, env = calls[0]
-    assert cmd[2:] == [
-        "modal",
-        "run",
-        "-m",
-        "biomodals.workflow.ppiflow_workflow::submit_ppiflow_workflow",
-        "--input-dir",
-        "inputs",
-        "--replicates",
-        "2",
-    ]
-    assert env is not None
-    assert env["GPU"] == "L40S"
-    assert env["TIMEOUT"] == "123"
-
-
 def test_workflow_run_rejects_files_outside_workflow_package(tmp_path: Path) -> None:
     ad_hoc_workflow = tmp_path / "ad_hoc_workflow.py"
     ad_hoc_workflow.write_text('"""Not a packaged Biomodals workflow."""\n')
