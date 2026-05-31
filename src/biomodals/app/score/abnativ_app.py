@@ -11,7 +11,6 @@ r"""AbNatiV source repo: <https://gitlab.doc.ic.ac.uk/sormanni-lab/abnativ>.
 # ruff: noqa: PLC0415
 import os
 from pathlib import Path
-from typing import NamedTuple
 
 import modal
 
@@ -32,20 +31,10 @@ CONF = AppConfig(
     python_version="3.12",
     cuda_version="cu128",
     gpu=os.environ.get("GPU", "A10G"),
+    model_volume_mountpoint="/root/.abnativ/models/pretrained_models",
 )
 
 
-class AppInfo(NamedTuple):
-    """Container for AbNAtiV-specific constants.
-
-    AbNatiV hard-coded cache directory for model weights.
-    """
-
-    model_dir: str = "/root/.abnativ/models/pretrained_models"
-    volume_subdir: str = f"/{CONF.name}"
-
-
-APP_INFO = AppInfo()
 ##########################################
 # Image and app definitions
 ##########################################
@@ -67,11 +56,7 @@ app = modal.App(CONF.name, image=runtime_image, tags=CONF.tags)
 ##########################################
 @app.function(
     cpu=(1.125, 16.125),
-    volumes={
-        APP_INFO.model_dir: MODEL_VOLUME.with_mount_options(
-            sub_path=APP_INFO.volume_subdir
-        )
-    },
+    volumes=CONF.mounts(model_volume=True, model_ro=False),
     timeout=MAX_TIMEOUT,
 )
 def download_abnativ_models(force: bool = False) -> None:
@@ -95,11 +80,7 @@ def download_abnativ_models(force: bool = False) -> None:
     cpu=(1.125, 16.125),  # burst for tar compression
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=CONF.timeout,
-    volumes={
-        APP_INFO.model_dir: MODEL_VOLUME.with_mount_options(
-            read_only=True, sub_path=APP_INFO.volume_subdir
-        )
-    },
+    volumes=CONF.mounts(model_volume=True),
 )
 def abnativ_score_unpaired(
     fasta_bytes: bytes,
@@ -155,11 +136,7 @@ def abnativ_score_unpaired(
     cpu=(1.125, 16.125),  # burst for tar compression
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=CONF.timeout,
-    volumes={
-        APP_INFO.model_dir: MODEL_VOLUME.with_mount_options(
-            read_only=True, sub_path=APP_INFO.volume_subdir
-        )
-    },
+    volumes=CONF.mounts(model_volume=True),
 )
 def abnativ_score_paired(
     csv_bytes: bytes,

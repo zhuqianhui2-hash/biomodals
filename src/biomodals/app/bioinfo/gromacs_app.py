@@ -12,7 +12,7 @@
 
 import os
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import modal
 
@@ -20,6 +20,7 @@ from biomodals.app.config import AppConfig
 from biomodals.helper import patch_image_for_helper
 from biomodals.helper.constant import MAX_TIMEOUT
 from biomodals.helper.shell import run_command
+from biomodals.helper.volume_run import volume_path_from_mount_path
 
 ##########################################
 # Modal configs
@@ -32,7 +33,7 @@ CONF = AppConfig(
     python_version="3.13",
     cuda_version="cu128",
     gpu=os.environ.get("GPU", "L40S"),
-    timeout=int(os.environ.get("TIMEOUT", str(MAX_TIMEOUT))),
+    timeout=int(os.environ.get("TIMEOUT", MAX_TIMEOUT)),
 )
 
 
@@ -53,8 +54,6 @@ class AppInfo:
 # Image and app definitions
 ##########################################
 APP_INFO = AppInfo()
-OUTPUTS_VOLUME = CONF.get_out_volume()
-OUTPUTS_VOLUME_NAME = OUTPUTS_VOLUME.name or f"{CONF.name}-outputs"
 
 runtime_image = (
     modal.Image
@@ -207,7 +206,7 @@ def file1_needs_update(file1: Path, file2: Path) -> bool:
     cpu=APP_INFO.gmx_threads + 0.125,
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=CONF.timeout,
-    volumes={CONF.output_volume_mountpoint: OUTPUTS_VOLUME},
+    volumes=CONF.mounts(output_volume=True),
 )
 def prepare_tpr_gpu(
     pdb_content: bytes,
@@ -242,7 +241,7 @@ def prepare_tpr_gpu(
 
     input_pdb_path = work_path / f"{run_name}.pdb"
     input_pdb_path.write_bytes(pdb_content)
-    OUTPUTS_VOLUME.commit()
+    CONF.output_volume.commit()
 
     script_path = Path(APP_INFO.gmx_scripts) / "prepare-tpr.sh"
     if not script_path.exists():
@@ -270,7 +269,7 @@ def prepare_tpr_gpu(
         cmd.append("--use-openmp-threads")
     # Modal adds this automatically but we want Gromacs to handle threading
     _ = run_command(cmd, cwd=str(work_path), env={"OMP_NUM_THREADS": None})
-    OUTPUTS_VOLUME.commit()
+    CONF.output_volume.commit()
     return str(work_path)
 
 
@@ -278,7 +277,7 @@ def prepare_tpr_gpu(
     cpu=APP_INFO.gmx_threads + 0.125,
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=CONF.timeout,
-    volumes={CONF.output_volume_mountpoint: OUTPUTS_VOLUME},
+    volumes=CONF.mounts(output_volume=True),
 )
 def prepare_tpr_cpu(
     pdb_content: bytes,
@@ -313,7 +312,7 @@ def prepare_tpr_cpu(
 
     input_pdb_path = work_path / f"{run_name}.pdb"
     input_pdb_path.write_bytes(pdb_content)
-    OUTPUTS_VOLUME.commit()
+    CONF.output_volume.commit()
 
     script_path = Path(APP_INFO.gmx_scripts) / "prepare-tpr.sh"
     if not script_path.exists():
@@ -342,7 +341,7 @@ def prepare_tpr_cpu(
     # Modal adds this automatically but we want Gromacs to handle threading
     _ = run_command(cmd, cwd=str(work_path), env={"OMP_NUM_THREADS": None})
 
-    OUTPUTS_VOLUME.commit()
+    CONF.output_volume.commit()
     return str(work_path)
 
 
@@ -350,7 +349,7 @@ def prepare_tpr_cpu(
     image=runtime_image,
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=CONF.timeout,
-    volumes={CONF.output_volume_mountpoint: OUTPUTS_VOLUME},
+    volumes=CONF.mounts(output_volume=True),
 )
 def find_traj_last_time_ns(traj_file: str) -> float:
     """Calculate the last-readable simulation time (ns) in a trajectory.
@@ -406,7 +405,7 @@ def find_traj_last_time_ns(traj_file: str) -> float:
     cpu=APP_INFO.gmx_threads + 0.125,
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=CONF.timeout,
-    volumes={CONF.output_volume_mountpoint: OUTPUTS_VOLUME},
+    volumes=CONF.mounts(output_volume=True),
 )
 def production_run_gpu(
     run_name: str,
@@ -467,7 +466,7 @@ def production_run_gpu(
 
     # Modal adds this automatically but we want Gromacs to handle threading
     _ = run_command(cmd, cwd=str(work_path), env={"OMP_NUM_THREADS": None})
-    OUTPUTS_VOLUME.commit()
+    CONF.output_volume.commit()
     return str(work_path)
 
 
@@ -475,7 +474,7 @@ def production_run_gpu(
     cpu=APP_INFO.gmx_threads + 0.125,
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=CONF.timeout,
-    volumes={CONF.output_volume_mountpoint: OUTPUTS_VOLUME},
+    volumes=CONF.mounts(output_volume=True),
 )
 def production_run_cpu(
     run_name: str,
@@ -536,7 +535,7 @@ def production_run_cpu(
 
     # Modal adds this automatically but we want Gromacs to handle threading
     _ = run_command(cmd, cwd=str(work_path), env={"OMP_NUM_THREADS": None})
-    OUTPUTS_VOLUME.commit()
+    CONF.output_volume.commit()
     return str(work_path)
 
 
@@ -544,7 +543,7 @@ def production_run_cpu(
     image=runtime_image,
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=CONF.timeout,
-    volumes={CONF.output_volume_mountpoint: OUTPUTS_VOLUME},
+    volumes=CONF.mounts(output_volume=True),
 )
 def postprocess_traj(
     traj_file: str,
@@ -577,7 +576,7 @@ def postprocess_traj(
         env={"OMP_NUM_THREADS": None},
         verbose=False,
     )
-    OUTPUTS_VOLUME.commit()
+    CONF.output_volume.commit()
 
 
 @app.function(
@@ -585,7 +584,7 @@ def postprocess_traj(
     cpu=1,
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=CONF.timeout,
-    volumes={CONF.output_volume_mountpoint: OUTPUTS_VOLUME},
+    volumes=CONF.mounts(output_volume=True),
 )
 def collect_traj_stats(
     traj_prefix: str,
@@ -621,7 +620,9 @@ def collect_traj_stats(
             str(processed_traj_path),
             ref_struct_file=str(work_path / f"{run_name}.pdb"),
         )
-    OUTPUTS_VOLUME.reload()
+
+    out_vol = CONF.output_volume
+    out_vol.reload()
     traj_1st_frame_pdb_path = work_path / f"{traj_prefix}{run_name}_nopbc_centered.pdb"
     if not traj_1st_frame_pdb_path.exists():
         raise RuntimeError(
@@ -650,7 +651,7 @@ def collect_traj_stats(
     trajectory = xtc_file.get_structure(template)
     if not save_processed_traj:
         processed_traj_path.unlink()
-        OUTPUTS_VOLUME.commit()
+        out_vol.commit()
 
     # Get simulation time (ns) for plotting purposes
     time = xtc_file.get_time() / 1000.0
@@ -666,7 +667,7 @@ def collect_traj_stats(
         last_frame_path.unlink(missing_ok=True)  # remove outdated last frame
     if not last_frame_path.exists():
         strucio.save_structure(last_frame_path, trajectory[-1])
-        OUTPUTS_VOLUME.commit()
+        out_vol.commit()
 
     # RMSD vs. the initial frame
     rmsd_fig_path = work_path / f"rmsd_{traj_prefix}{run_name}.png"
@@ -684,7 +685,7 @@ def collect_traj_stats(
             header="time_ns,rmsd",
             comments="",
         )
-        OUTPUTS_VOLUME.commit()
+        out_vol.commit()
 
         if not rmsd_fig_path.exists() and make_figures:
             figure, ax = plt.subplots(figsize=(6, 3), dpi=200, layout="constrained")
@@ -696,7 +697,7 @@ def collect_traj_stats(
             figure.savefig(rmsd_fig_path)
             plt.close(figure)
 
-            OUTPUTS_VOLUME.commit()
+            out_vol.commit()
 
     # Radius of gyration
     rg_fig_path = work_path / f"rg_{traj_prefix}{run_name}.png"
@@ -714,7 +715,7 @@ def collect_traj_stats(
             header="time_ns,rg",
             comments="",
         )
-        OUTPUTS_VOLUME.commit()
+        out_vol.commit()
         if not rg_fig_path.exists() and make_figures:
             figure, ax = plt.subplots(figsize=(6, 3), dpi=200, layout="constrained")
             ax.plot(time, rg, color=biotite.colors["dimgreen"])
@@ -725,7 +726,7 @@ def collect_traj_stats(
             figure.savefig(rg_fig_path)
             plt.close(figure)
 
-            OUTPUTS_VOLUME.commit()
+            out_vol.commit()
 
     # RMSF of each residue
     rmsf_fig_path = work_path / f"rmsf_{traj_prefix}{run_name}.png"
@@ -747,7 +748,7 @@ def collect_traj_stats(
             header="residue_index,rmsf",
             comments="",
         )
-        OUTPUTS_VOLUME.commit()
+        out_vol.commit()
         if not rmsf_fig_path.exists() and make_figures:
             # Sidechain atoms fluctuate too much, so we only consider CA atoms
             figure, ax = plt.subplots(figsize=(6, 3), dpi=200, layout="constrained")
@@ -759,7 +760,7 @@ def collect_traj_stats(
             figure.savefig(rmsf_fig_path)
             plt.close(figure)
 
-            OUTPUTS_VOLUME.commit()
+            out_vol.commit()
 
     return str(work_path)
 
@@ -852,8 +853,7 @@ def submit_gromacs_task(
 
     _ = modal.FunctionCall.gather(*process_traj_tasks, prod_traj_task)
 
-    remote_volume_dir = PurePosixPath(remote_workdir).relative_to(
-        CONF.output_volume_mountpoint
+    remote_vol = volume_path_from_mount_path(
+        remote_workdir, CONF.output_volume_mountpoint, CONF.output_volume_name
     )
-    print("🧬 Gromacs preparation complete! Check data with: \n")
-    print(f"  modal volume ls {OUTPUTS_VOLUME_NAME} {remote_volume_dir}")
+    print(f"🧬 Gromacs preparation complete! Check data in {remote_vol}")

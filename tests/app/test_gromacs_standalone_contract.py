@@ -4,6 +4,7 @@
 
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 from biomodals.app.bioinfo import gromacs_app
 
@@ -83,8 +84,11 @@ def test_fresh_production_run_uses_mdp_nsteps(tmp_path: Path, monkeypatch) -> No
             self.commit_count += 1
 
     volume = FakeVolume()
-    monkeypatch.setattr(gromacs_app.CONF, "output_volume_mountpoint", str(tmp_path))
-    monkeypatch.setattr(gromacs_app, "OUTPUTS_VOLUME", volume)
+    monkeypatch.setattr(
+        gromacs_app,
+        "CONF",
+        SimpleNamespace(output_volume_mountpoint=str(tmp_path), output_volume=volume),
+    )
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/gmx")
 
     def fake_run_command(cmd, *, cwd, env):

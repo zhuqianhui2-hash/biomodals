@@ -3,6 +3,7 @@
 # ruff: noqa: D103
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from biomodals.app.fold import flowpacker_app
 from biomodals.schema import AppRunStatus, ArtifactKind, VolumePath
@@ -30,9 +31,17 @@ def test_flowpacker_workflow_result_stores_archive_in_volume(
             self.commit_count += 1
 
     output_volume = FakeOutputVolume()
+    output_volume_name = flowpacker_app.CONF.output_volume_name
     monkeypatch.setattr(flowpacker_app, "run_flowpacker", FakeRunFlowPacker())
-    monkeypatch.setattr(flowpacker_app, "OUT_VOLUME", output_volume)
-    monkeypatch.setattr(flowpacker_app.CONF, "output_volume_mountpoint", str(tmp_path))
+    monkeypatch.setattr(
+        flowpacker_app,
+        "CONF",
+        SimpleNamespace(
+            output_volume=output_volume,
+            output_volume_mountpoint=str(tmp_path),
+            output_volume_name=output_volume_name,
+        ),
+    )
 
     result = flowpacker_app.run_flowpacker_workflow.get_raw_f()(
         input_files=[("input.pdb", b"ATOM\n")],
@@ -46,7 +55,7 @@ def test_flowpacker_workflow_result_stores_archive_in_volume(
     assert output.name == "flowpacker_outputs"
     assert output.kind == ArtifactKind.ARCHIVE
     assert output.storage == VolumePath(
-        volume_name=flowpacker_app.OUT_VOLUME_NAME,
+        volume_name=output_volume_name,
         path="workflow/packed/packed.tar.zst",
         media_type="application/zstd",
     )

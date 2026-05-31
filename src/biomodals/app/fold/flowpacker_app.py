@@ -51,12 +51,12 @@ from biomodals.helper.shell import (
     run_command_with_log,
     sanitize_filename,
 )
+from biomodals.helper.volume_run import volume_path_from_mount_path
 from biomodals.schema import (
     AppOutput,
     AppRunResult,
     AppRunStatus,
     ArtifactKind,
-    VolumePath,
 )
 
 ##########################################
@@ -72,6 +72,7 @@ CONF = AppConfig(
     cuda_version="cu121",
     gpu=os.environ.get("GPU", "L40S"),
     timeout=int(os.environ.get("TIMEOUT", "3600")),
+    model_volume_mountpoint="/opt/FlowPacker/checkpoints",
 )
 
 
@@ -106,8 +107,6 @@ class AppInfo:
 # Image and app definitions
 ##########################################
 APP_INFO = AppInfo()
-OUT_VOLUME = CONF.get_out_volume()
-OUT_VOLUME_NAME = OUT_VOLUME.name or f"{CONF.name}-outputs"
 
 runtime_image = (
     modal.Image
@@ -145,65 +144,46 @@ def _safe_flowpacker_run_name(run_name: str) -> str:
 ##########################################
 def _checkpoint_path(name: str) -> Path:
     """Return the shared-volume path for a FlowPacker checkpoint."""
-    return CONF.model_dir / "checkpoints" / f"{name}.pth"
+    return Path(CONF.model_volume_mountpoint) / f"{name}.pth"
 
 
 @app.function(
     cpu=(0.125, 8.125),
     timeout=CONF.timeout,
-    volumes={CONF.model_volume_mountpoint: MODEL_VOLUME},
+    volumes=CONF.mounts(model_volume=True, model_ro=False),
 )
 def download_flowpacker_checkpoints(force: bool = False) -> None:
     """Download FlowPacker Git LFS checkpoints into the model volume."""
     from biomodals.helper.shell import run_command
 
-    checkpoint_dir = CONF.model_dir / "checkpoints"
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-    wanted = [_checkpoint_path(name) for name in APP_INFO.checkpoint_names]
-    if not force and all(path.exists() for path in wanted):
+    checkpoint_dir = Path(CONF.model_volume_mountpoint)
+    wanted = [checkpoint_dir / f"{name}.pth" for name in APP_INFO.checkpoint_names]
+    if not force and all(
+        path.exists() and path.stat().st_size > 1024 for path in wanted
+    ):
         print("💊 FlowPacker checkpoints already exist in the model volume")
         return
 
     if force:
         _ = [path.unlink(missing_ok=True) for path in wanted]
 
-    include_paths = ",".join(
-        f"checkpoints/{name}.pth" for name in APP_INFO.checkpoint_names
+    include_paths = (f"checkpoints/{name}.pth" for name in APP_INFO.checkpoint_names)
+    include_paths_str = ",".join(
+        f for f in include_paths if not (checkpoint_dir / Path(f).name).exists()
     )
     run_command(["git", "lfs", "install", "--skip-repo"], cwd=CONF.git_clone_dir)
     run_command(
-        ["git", "lfs", "pull", "--include", include_paths, "--exclude", ""],
+        ["git", "lfs", "pull", "--include", include_paths_str],
         cwd=CONF.git_clone_dir,
         env={"GIT_LFS_SKIP_SMUDGE": "0"},
     )
-
-    for name in APP_INFO.checkpoint_names:
-        src = CONF.git_clone_dir / "checkpoints" / f"{name}.pth"
-        dst = _checkpoint_path(name)
-        shutil.copy2(src, dst)
-        MODEL_VOLUME.commit()
+    MODEL_VOLUME.commit()
     print("💊 FlowPacker checkpoint download complete")
 
 
 ##########################################
 # Inference functions
 ##########################################
-def _ensure_checkpoint_symlink() -> None:
-    """Link the repo checkpoint directory to the mounted model volume."""
-    checkpoint_src = CONF.model_dir / "checkpoints"
-    checkpoint_link = CONF.git_clone_dir / "checkpoints"
-    if checkpoint_link.is_symlink() and checkpoint_link.resolve() == checkpoint_src:
-        return
-
-    if checkpoint_link.is_dir() and not checkpoint_link.is_symlink():
-        shutil.rmtree(checkpoint_link)
-    elif checkpoint_link.exists() or checkpoint_link.is_symlink():
-        checkpoint_link.unlink()
-
-    checkpoint_link.symlink_to(checkpoint_src, target_is_directory=True)
-
-
 def _write_flowpacker_config(
     config_path: Path,
     *,
@@ -253,7 +233,7 @@ def _write_flowpacker_config(
     memory=(1024, 65536),
     timeout=CONF.timeout,
     # Cannot mount as ro as FlowPacker mkdirs there for whatever reason
-    volumes={CONF.model_volume_mountpoint: MODEL_VOLUME},
+    volumes=CONF.mounts(model_volume=True, model_ro=False),
 )
 def run_flowpacker(
     input_files: list[tuple[str, bytes]],
@@ -285,8 +265,6 @@ def run_flowpacker(
         raise FileNotFoundError(
             f"FlowPacker confidence checkpoint is missing: {confidence_ckpt_path}"
         )
-
-    _ensure_checkpoint_symlink()
 
     run_name = _safe_flowpacker_run_name(run_name)
     input_dir = Path(mkdtemp(prefix="flowpacker_inputs_"))
@@ -343,10 +321,7 @@ def run_flowpacker(
     cpu=(0.125, 16.125),
     memory=(1024, 65536),
     timeout=CONF.timeout,
-    volumes={
-        CONF.model_volume_mountpoint: MODEL_VOLUME,
-        CONF.output_volume_mountpoint: OUT_VOLUME,
-    },
+    volumes=CONF.mounts(output_volume=True, model_volume=True, model_ro=False),
 )
 def run_flowpacker_workflow(
     input_files: list[tuple[str, bytes]],
@@ -381,16 +356,17 @@ def run_flowpacker_workflow(
     archive_path = volume_root / "workflow" / safe_run_name / archive_filename
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     archive_path.write_bytes(tarball_bytes)
-    OUT_VOLUME.commit()
+    CONF.output_volume.commit()
     return AppRunResult(
         status=AppRunStatus.SUCCEEDED,
         outputs=[
             AppOutput(
                 name="flowpacker_outputs",
                 kind=ArtifactKind.ARCHIVE,
-                storage=VolumePath(
-                    volume_name=OUT_VOLUME_NAME,
-                    path=archive_path.relative_to(volume_root).as_posix(),
+                storage=volume_path_from_mount_path(
+                    remote_path=str(archive_path),
+                    mount_root=str(volume_root),
+                    volume_name=CONF.output_volume_name,
                     media_type="application/zstd",
                 ),
                 metadata={

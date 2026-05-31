@@ -3,15 +3,13 @@
 # ruff: noqa: PLC0415
 
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 import modal
 
 from biomodals.app.config import AppConfig
 from biomodals.helper import patch_image_for_helper
-from biomodals.helper.constant import MODEL_VOLUME
-from biomodals.helper.shell import package_outputs, softlink_dir
+from biomodals.helper.shell import package_outputs
 
 ##########################################
 # Modal configs
@@ -26,20 +24,12 @@ CONF = AppConfig(
     cuda_version="cu126",
     gpu=os.environ.get("GPU", "L40S"),
     timeout=int(os.environ.get("TIMEOUT", "86400")),
+    model_volume_mountpoint="/root/.paddlex",
 )
-
-
-@dataclass
-class AppInfo:
-    """Container for PaddleOCR-specific configuration and constants."""
-
-    model_weights_path: str = "/root/.paddlex"
-
 
 ##########################################
 # Image and app definitions
 ##########################################
-APP_INFO = AppInfo()
 runtime_image = (
     modal.Image
     .debian_slim(python_version=CONF.python_version)
@@ -65,18 +55,13 @@ app = modal.App(CONF.name, image=runtime_image, tags=CONF.tags)
     gpu=CONF.gpu,
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=CONF.timeout,
-    volumes={CONF.model_volume_mountpoint: MODEL_VOLUME},
+    volumes=CONF.mounts(model_volume=True, model_ro=False),
 )
 def run_paddleocr(input_content: bytes, input_name: str) -> bytes:
     """Run PaddleOCR on the input PDF content and return extracted markdown and images."""
     from tempfile import mkdtemp
 
     from paddleocr import PaddleOCRVL  # type: ignore[ty:unresolved-import]
-
-    # PaddleOCR hardcodes the model cache directory
-    model_cache_dir = Path(CONF.model_volume_mountpoint) / CONF.name
-    model_cache_dir.mkdir(parents=True, exist_ok=True)
-    softlink_dir(model_cache_dir, Path(APP_INFO.model_weights_path))
 
     run_dir = ".".join(input_name.split(".")[:-1])
     workdir = Path(mkdtemp(prefix=f"{CONF.name}_")) / run_dir

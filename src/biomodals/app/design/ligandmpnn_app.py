@@ -507,8 +507,4 @@ def submit_ligandmpnn_task(
 
     print(f"🧬 Downloading results for {run_name}...")
     (local_out_dir / f"{run_name}-{script_mode}.tar.zst").write_bytes(res_bytes)
-    # run_command(
-    #     ["modal", "volume", "get", OUTPUTS_VOLUME_NAME, str(remote_results_dir)],
-    #     cwd=local_out_dir,
-    # )
     print(f"🧬 Results saved to: {local_out_dir.resolve()}")

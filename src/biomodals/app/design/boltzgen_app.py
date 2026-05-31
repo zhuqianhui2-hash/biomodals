@@ -327,7 +327,7 @@ def collect_boltzgen_data(
 
     out_vol.reload()
     vol_path = volume_path_from_mount_path(
-        outdir, CONF.output_volume_mountpoint, CONF.output_volume_name
+        str(outdir), CONF.output_volume_mountpoint, CONF.output_volume_name
     )
     if filter_results:
         # Rerun BoltzGen filters on all run IDs, and only download the designs
@@ -701,7 +701,7 @@ def submit_boltzgen_task(
                 f"🧬 Including additional referenced files: {list(yml_parser.additional_files.keys())}"
             )
 
-        # TODO: use OUTPUTS_VOLUME.batch_upload to avoid spinning up container
+        # TODO: use CONF.output_volume.batch_upload to avoid spinning up container
         print(f"🧬 Submitting BoltzGen run for yaml: {input_yaml}")
         yaml_str = yaml_path.read_bytes()
 

@@ -24,7 +24,6 @@ import modal
 
 from biomodals.app.config import AppConfig
 from biomodals.helper import patch_image_for_helper
-from biomodals.helper.constant import MODEL_VOLUME
 from biomodals.helper.shell import (
     copy_files,
     run_command,
@@ -34,6 +33,7 @@ from biomodals.helper.shell import (
 from biomodals.helper.volume_run import (
     build_volume_run_paths,
     has_completed_output_files,
+    volume_path_from_mount_path,
 )
 
 ##########################################
@@ -56,7 +56,6 @@ class AppInfo:
     """Container for AF3Score-specific configuration and constants."""
 
     af3_weights: str = "AlphaFold3/af3.bin"
-    out_volume: modal.Volume = CONF.get_out_volume()
 
 
 ##########################################
@@ -189,12 +188,12 @@ class TaskSpec:
     cpu=(0.125, 1.125),
     memory=(512, 2048),
     timeout=CONF.timeout,
-    volumes={CONF.output_volume_mountpoint: AppInfo.out_volume},
+    volumes=CONF.mounts(output_volume=True),
 )
 def af3score_manage_lock(run_name: str, acquire: bool = True) -> None:
     """Internal-only remote helper for acquiring or releasing one run-level lock."""
     # TODO: replace with a task queue; mkdir in Volumes may not be atomic
-    AppInfo.out_volume.reload()
+    CONF.output_volume.reload()
     paths = _run_paths(run_name)
     root_dir = paths["run_root"]
     lock_dir = root_dir / ".run.lock"
@@ -206,25 +205,25 @@ def af3score_manage_lock(run_name: str, acquire: bool = True) -> None:
             raise RuntimeError(
                 f"`{run_name=}` is already in use by another active AF3Score run."
             ) from exc
-        AppInfo.out_volume.commit()
+        CONF.output_volume.commit()
         return
 
     if lock_dir.exists():
         lock_dir.rmdir()
-        AppInfo.out_volume.commit()
+        CONF.output_volume.commit()
 
 
 @app.function(
     cpu=(1.125, 16.125),
     memory=(1024, 32768),
     timeout=CONF.timeout,
-    volumes={CONF.output_volume_mountpoint: AppInfo.out_volume},
+    volumes=CONF.mounts(output_volume=True),
 )
 def af3score_prepare(
     paths: dict[str, Path], input_files: list[str], num_jobs: int, prepare_workers: int
 ) -> TaskSpec:
     """Prepare AF3Score batches from staged inputs."""
-    AppInfo.out_volume.reload()
+    CONF.output_volume.reload()
     staged_dir = paths["inputs_dir"].resolve()
     if not staged_dir.exists():
         raise FileNotFoundError(f"Staged input directory not found: {staged_dir}")
@@ -316,15 +315,15 @@ def af3score_prepare(
     memory=(1024, 65536),
     timeout=CONF.timeout,
     volumes={
-        CONF.output_volume_mountpoint: AppInfo.out_volume,
-        CONF.model_volume_mountpoint: MODEL_VOLUME.read_only(),
+        **CONF.mounts(output_volume=True),
+        **CONF.mounts(model_volume=True, model_mount_subdir=False),
     },
 )
 def af3score_run(
     paths: dict[str, Path], batch_name: str, batch_json_dir: str, batch_pdb_dir: str
 ):
     """Run one AF3Score batch."""
-    AppInfo.out_volume.reload()
+    CONF.output_volume.reload()
     af3_weights = Path(CONF.model_volume_mountpoint) / APP_INFO.af3_weights
     if not af3_weights.exists():
         raise FileNotFoundError(f"AlphaFold3 model weights not found: {af3_weights}")
@@ -372,20 +371,20 @@ def af3score_run(
             ],
             log_file=out_dir / f"{batch_name}.log",
         )
-        AppInfo.out_volume.commit()
+        CONF.output_volume.commit()
 
 
 @app.function(
     cpu=(0.125, 16.125),
     memory=(1024, 16384),
     timeout=CONF.timeout,
-    volumes={CONF.output_volume_mountpoint: AppInfo.out_volume},
+    volumes=CONF.mounts(output_volume=True),
 )
 def af3score_postprocess(
     input_files: list[str], paths: dict[str, Path]
 ) -> dict[str, int | str]:
     """Validate records and collect metrics for all inputs."""
-    AppInfo.out_volume.reload()
+    CONF.output_volume.reload()
     for path in (paths["output_dir"], paths["failed_dir"]):
         path.mkdir(parents=True, exist_ok=True)
 
@@ -438,7 +437,7 @@ def af3score_postprocess(
 
     if paths["prep_dir"].exists():
         shutil.rmtree(paths["prep_dir"])
-    AppInfo.out_volume.commit()
+    CONF.output_volume.commit()
     return {
         "output_dir": str(out_dir),
         "failed_dir": str(paths["failed_dir"]),
@@ -488,16 +487,21 @@ def submit_af3score_task(
     run_name = sanitize_filename(run_name)
     run_paths = _run_paths(run_name)
     if not force:
-        for x in AppInfo.out_volume.iterdir("/"):
+        for x in CONF.output_volume.iterdir("/"):
             if x.path == run_name:
                 raise ValueError(
                     f"Run name '{run_name}' already exists in Modal volume."
                 )
+    remote_run_dir = volume_path_from_mount_path(
+        str(run_paths["run_root"]),
+        CONF.output_volume_mountpoint,
+        CONF.output_volume_name,
+    )
     af3score_manage_lock.remote(run_name=run_name, acquire=True)
     try:
-        print(f"🧬 Uploading '{input_root}' to Modal")
+        print(f"🧬 Uploading '{input_root}' to {remote_run_dir}")
         stage_root = run_paths["inputs_dir"].relative_to(run_paths["mount_root"])
-        with AppInfo.out_volume.batch_upload(force=force) as batch:
+        with CONF.output_volume.batch_upload(force=force) as batch:
             if num_files == 1:
                 f = all_files[0]
                 batch.put_file(f, f"/{stage_root}/{f.name}")
@@ -559,7 +563,7 @@ def submit_af3score_task(
             local_metrics_csv = local_out_dir / f"{run_name}_af3score_metrics.csv"
             print("🧬 Downloading metrics CSV...")
             with open(local_metrics_csv, "wb") as f:
-                for chunk in AppInfo.out_volume.read_file(
+                for chunk in CONF.output_volume.read_file(
                     str(run_paths["metrics_csv"].relative_to(run_paths["mount_root"]))
                 ):
                     f.write(chunk)
