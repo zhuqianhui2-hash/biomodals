@@ -55,9 +55,7 @@ app = modal.App(CONF.name, image=runtime_image, tags=CONF.tags)
 # Fetch model weights
 ##########################################
 @app.function(
-    cpu=(1.125, 16.125),
-    volumes=CONF.mounts(model_volume=True, model_ro=False),
-    timeout=MAX_TIMEOUT,
+    volumes=CONF.mounts(model_volume=True, model_ro=False), timeout=MAX_TIMEOUT
 )
 def download_abnativ_models(force: bool = False) -> None:
     """Download AbNatiV models into the mounted volume."""

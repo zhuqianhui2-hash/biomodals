@@ -41,7 +41,7 @@ app = modal.App(CONF.name, image=runtime_image, tags=CONF.tags)
 
 
 @app.cls(
-    cpu=(1.125, 16.125),
+    cpu=(0.125, 16.125),
     memory=(1024, 65536),
     timeout=MAX_TIMEOUT,
     volumes={CONF.output_volume_mountpoint: OUT_VOLUME},

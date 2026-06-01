@@ -157,12 +157,7 @@ class TaskSpec:
 ##########################################
 # Inference functions
 ##########################################
-@app.function(
-    cpu=(0.125, 1.125),
-    memory=(512, 2048),
-    timeout=CONF.timeout,
-    volumes=CONF.mounts(output_volume=True),
-)
+@app.function(timeout=CONF.timeout, volumes=CONF.mounts(output_volume=True))
 def af3score_manage_lock(run_name: str, acquire: bool = True) -> None:
     """Internal-only remote helper for acquiring or releasing one run-level lock."""
     # TODO: replace with a task queue; mkdir in Volumes may not be atomic
@@ -191,7 +186,7 @@ def af3score_manage_lock(run_name: str, acquire: bool = True) -> None:
 
 
 @app.function(
-    cpu=(1.125, 16.125),
+    cpu=(0.125, 16.125),
     memory=(1024, 32768),
     timeout=CONF.timeout,
     volumes=CONF.mounts(output_volume=True),
