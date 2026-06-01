@@ -22,6 +22,7 @@ generated merged PDB and FASTA for design.
 # ruff: noqa: PLC0415
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,12 +32,11 @@ from biomodals.app.config import AppConfig
 from biomodals.helper import patch_image_for_helper
 from biomodals.helper.constant import MODEL_VOLUME
 from biomodals.helper.io import resolve_local_output_dir
-from biomodals.helper.shell import (
-    run_command,
-    run_command_with_log,
-    sanitize_filename,
+from biomodals.helper.shell import run_command, run_command_with_log, sanitize_filename
+from biomodals.helper.volume_run import (
+    build_volume_run_paths,
+    volume_path_from_mount_path,
 )
-from biomodals.helper.volume_run import build_volume_run_paths
 from biomodals.helper.web import download_files
 
 ##########################################
@@ -52,24 +52,15 @@ CONF = AppConfig(
     cuda_version="cu117",
     gpu=os.environ.get("GPU", "A10G"),
     timeout=int(os.environ.get("TIMEOUT", "18000")),
+    model_volume_mountpoint="/opt/IgGM/checkpoints",  # git_clone_dir
 )
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class AppInfo:
     """Container for IgGM-specific information and configurations."""
 
-    repo_dir: Path = CONF.git_clone_dir
-    outputs_volume: modal.Volume = field(default_factory=lambda: CONF.output_volume)
-    outputs_dir: str = CONF.output_volume_mountpoint
-    model_names: tuple[str, ...] = (
-        "esm_ppi_650m_ab",
-        "antibody_design_trunk",
-        "antibody_inverse_design_trunk",
-        "antibody_fr_design_trunk",
-        "igso3_buffer",
-    )
-    model_md5: dict[str, str] = field(
+    model_md5: Mapping[str, str] = field(
         default_factory=lambda: {
             "antibody_design_trunk": "975baa1f0f5d9ae5cb7afdd4ed179da7",
             "antibody_fr_design_trunk": "be06510ce1562603f3a76e01a92f8a63",
@@ -85,13 +76,6 @@ class AppInfo:
         "fr_design",
     })
     merge_chains_task: str = "merge_chains"
-    checkpoints_dir: Path = CONF.git_clone_dir / "checkpoints"
-    model_volume_sub_path: str = f"/{CONF.name}"
-
-    @property
-    def outputs_volume_name(self) -> str:
-        """Name of the persisted IgGM output volume."""
-        return CONF.output_volume_name
 
 
 APP_INFO = AppInfo()
@@ -99,15 +83,17 @@ APP_INFO = AppInfo()
 ##########################################
 # Image and app definitions
 ##########################################
-runtime_image = patch_image_for_helper(
+runtime_image = (
     modal.Image
     .debian_slim(python_version=CONF.python_version)
-    .apt_install("git", "wget", "build-essential", "zstd")
+    .apt_install("git", "wget", "build-essential")
     .env(CONF.default_env)
-    .uv_pip_install(
-        "torch==2.0.1",
-        "torchvision==0.15.2",
+    .run_commands(
+        f"git clone {CONF.repo_url} {CONF.git_clone_dir}",
+        f"cd {CONF.git_clone_dir} && git checkout {CONF.repo_commit_hash}",
     )
+    .workdir(str(CONF.git_clone_dir))
+    .uv_pip_install("torch==2.0.1", "torchvision==0.15.2")
     .uv_pip_install(
         "torch_geometric==2.5.2",
         "pyg_lib",
@@ -127,22 +113,18 @@ runtime_image = patch_image_for_helper(
         "termcolor==3.1.0",
         "absl-py==2.1.0",
         "biopython==1.85",
-        "polars==1.19.0",
         "openmm==8.3.1",
         "pdbfixer==1.12.0",
         "ml-collections",
         "prody==2.6.1",
     )
-    .run_commands(
-        f"git clone {CONF.repo_url} {APP_INFO.repo_dir}",
-        f"cd {APP_INFO.repo_dir} && git checkout {CONF.repo_commit_hash}",
-    )
+    .pipe(patch_image_for_helper)
 )
 
 app = modal.App(CONF.name, image=runtime_image, tags=CONF.tags)
 
 
-def _md5_matches(path: Path, expected_md5: str) -> bool:
+def _md5_matches(path: str | Path, expected_md5: str) -> bool:
     """Check a local file's MD5 checksum with md5sum."""
     import subprocess as sp
     from tempfile import TemporaryDirectory
@@ -163,20 +145,14 @@ def _md5_matches(path: Path, expected_md5: str) -> bool:
 @app.function(
     cpu=(0.125, 8.125),
     timeout=CONF.timeout,
-    volumes={
-        APP_INFO.checkpoints_dir: MODEL_VOLUME.with_mount_options(
-            read_only=False,
-            sub_path=APP_INFO.model_volume_sub_path,
-        )
-    },
-    image=runtime_image,
+    volumes=CONF.mounts(model_volume=True, model_ro=False),
 )
 def download_iggm_models(force: bool = False) -> None:
     """Download IgGM model weights into the shared model volume."""
-    MODEL_VOLUME.reload()
+    checkpoints_dir = Path(CONF.git_clone_dir) / "checkpoints"
     model_urls = {}
-    for name in APP_INFO.model_names:
-        path = APP_INFO.checkpoints_dir / f"{name}.pth"
+    for name in APP_INFO.model_md5.keys():
+        path = checkpoints_dir / f"{name}.pth"
         if path.exists() and not force:
             if _md5_matches(path, APP_INFO.model_md5[name]):
                 continue
@@ -189,35 +165,19 @@ def download_iggm_models(force: bool = False) -> None:
 
     if model_urls:
         download_files(
-            model_urls,
-            force=force,
-            progress_bar_desc="Downloading IgGM models",
+            model_urls, force=force, progress_bar_desc="Downloading IgGM models"
         )
         for path in model_urls.values():
             name = Path(path).stem
-            if not _md5_matches(Path(path), APP_INFO.model_md5[name]):
+            expected_hash = APP_INFO.model_md5[name]
+            if not _md5_matches(path, expected_hash):
                 raise RuntimeError(
-                    f"Checksum mismatch for {Path(path).name}: "
-                    f"expected {APP_INFO.model_md5[name]}"
+                    f"Checksum mismatch for {name}: expected {expected_hash}"
                 )
     else:
-        print(f"💊 IgGM model weights already exist under {APP_INFO.checkpoints_dir}")
+        print(f"💊 IgGM model weights already exist under {checkpoints_dir}")
     MODEL_VOLUME.commit()
-    print(f"💊 IgGM model weights are available under {APP_INFO.checkpoints_dir}")
-
-
-def _download_remote_run(remote_run_dir: str, out_dir: str, label: str) -> None:
-    """Download one persisted Modal volume run directory to a local directory."""
-    local_out_dir = resolve_local_output_dir(out_dir)
-    local_out_dir.mkdir(parents=True, exist_ok=True)
-    local_run_dir = local_out_dir / remote_run_dir
-    if local_run_dir.exists():
-        raise FileExistsError(f"Local output directory already exists: {local_run_dir}")
-    run_command(
-        ["modal", "volume", "get", APP_INFO.outputs_volume_name, remote_run_dir],
-        cwd=local_out_dir,
-    )
-    print(f"🧬 {label} downloaded to: {local_run_dir}")
+    print(f"💊 IgGM model weights are available under {checkpoints_dir}")
 
 
 ##########################################
@@ -227,8 +187,7 @@ def _download_remote_run(remote_run_dir: str, out_dir: str, label: str) -> None:
     cpu=(0.125, 8.125),
     memory=(1024, 32768),
     timeout=CONF.timeout,
-    volumes={APP_INFO.outputs_dir: APP_INFO.outputs_volume},
-    image=runtime_image,
+    volumes=CONF.mounts(output_volume=True),
 )
 def merge_pdb_chains(
     antigen_pdb_bytes: bytes,
@@ -247,9 +206,7 @@ def merge_pdb_chains(
             `A`, for example `A_B_C`.
 
     """
-    APP_INFO.outputs_volume.reload()
-
-    run_paths = build_volume_run_paths(APP_INFO.outputs_dir, run_name)
+    run_paths = build_volume_run_paths(CONF.output_volume_mountpoint, run_name)
     workdir = run_paths["run_root"]
     input_dir = run_paths["inputs_dir"]
     output_dir = run_paths["output_dir"]
@@ -273,25 +230,20 @@ def merge_pdb_chains(
     ]
 
     log_path = workdir / "iggm_merge_chains.log"
-    APP_INFO.outputs_volume.commit()
+    CONF.output_volume.commit()
     print("💊 Merging IgGM antigen chains...")
     try:
         run_command_with_log(
-            cmd,
-            log_file=log_path,
-            verbose=True,
-            cwd=APP_INFO.repo_dir,
-            env={"PYTHONPATH": str(APP_INFO.repo_dir)},
+            cmd, log_file=log_path, verbose=True, cwd=CONF.git_clone_dir
         )
     finally:
-        APP_INFO.outputs_volume.commit()
+        CONF.output_volume.commit()
 
-    relative_workdir = workdir.relative_to(APP_INFO.outputs_dir)
-    print(
-        f"💊 Merged chain results are available at '{relative_workdir}' "
-        f"in volume '{APP_INFO.outputs_volume_name}'."
+    relative_vol_dir = volume_path_from_mount_path(
+        str(workdir), CONF.output_volume_mountpoint, CONF.output_volume_name
     )
-    return str(relative_workdir)
+    print(f"💊 Merged chain results are available at {relative_vol_dir}")
+    return relative_vol_dir.path
 
 
 @app.function(
@@ -299,14 +251,7 @@ def merge_pdb_chains(
     cpu=(0.125, 16.125),
     memory=(1024, 65536),
     timeout=CONF.timeout,
-    volumes={
-        APP_INFO.checkpoints_dir: MODEL_VOLUME.with_mount_options(
-            read_only=True,
-            sub_path=APP_INFO.model_volume_sub_path,
-        ),
-        APP_INFO.outputs_dir: APP_INFO.outputs_volume,
-    },
-    image=runtime_image,
+    volumes=CONF.mounts(output_volume=True, model_volume=True),
 )
 def iggm_inference(
     input_fasta_bytes: bytes,
@@ -323,9 +268,7 @@ def iggm_inference(
     if task not in APP_INFO.valid_tasks:
         raise ValueError(f"Task must be one of {sorted(APP_INFO.valid_tasks)}.")
 
-    APP_INFO.outputs_volume.reload()
-
-    run_paths = build_volume_run_paths(APP_INFO.outputs_dir, run_name)
+    run_paths = build_volume_run_paths(CONF.output_volume_mountpoint, run_name)
     workdir = run_paths["run_root"]
     input_dir = run_paths["inputs_dir"]
     output_dir = run_paths["output_dir"]
@@ -362,30 +305,39 @@ def iggm_inference(
     cmd.extend(["--output", str(output_dir)])
 
     log_path = workdir / "iggm.log"
-    APP_INFO.outputs_volume.commit()
+    CONF.output_volume.commit()
     print("💊 Running IgGM...")
     try:
         run_command_with_log(
-            cmd,
-            log_file=log_path,
-            verbose=True,
-            cwd=APP_INFO.repo_dir,
-            env={"PYTHONPATH": str(APP_INFO.repo_dir)},
+            cmd, log_file=log_path, verbose=True, cwd=CONF.git_clone_dir
         )
     finally:
-        APP_INFO.outputs_volume.commit()
+        CONF.output_volume.commit()
 
-    relative_workdir = workdir.relative_to(APP_INFO.outputs_dir)
-    print(
-        f"💊 Results are available at '{relative_workdir}' "
-        f"in volume '{APP_INFO.outputs_volume_name}'."
+    relative_vol_dir = volume_path_from_mount_path(
+        str(workdir), CONF.output_volume_mountpoint, CONF.output_volume_name
     )
-    return str(relative_workdir)
+    print(f"💊 Results are available at {relative_vol_dir}")
+    return relative_vol_dir.path
 
 
 ##########################################
 # Local entrypoints
 ##########################################
+def _download_remote_run(remote_run_dir: str, out_dir: str, label: str) -> None:
+    """Download one persisted Modal volume run directory to a local directory."""
+    local_out_dir = resolve_local_output_dir(out_dir)
+    local_out_dir.mkdir(parents=True, exist_ok=True)
+    local_run_dir = local_out_dir / remote_run_dir
+    if local_run_dir.exists():
+        raise FileExistsError(f"Local output directory already exists: {local_run_dir}")
+    run_command(
+        ["modal", "volume", "get", CONF.output_volume_name, remote_run_dir],
+        cwd=local_out_dir,
+    )
+    print(f"🧬 {label} downloaded to: {local_run_dir}")
+
+
 @app.local_entrypoint()
 def submit_iggm_task(
     input_fasta: str | None = None,
@@ -469,15 +421,6 @@ def submit_iggm_task(
             merge_ids=merge_ids,
         )
 
-        print(
-            f"🧬 Merge-chain results saved to '{remote_run_dir}' "
-            f"in Modal volume '{APP_INFO.outputs_volume_name}'."
-        )
-        print(
-            "🧬 Download with: "
-            f"modal volume get {APP_INFO.outputs_volume_name} {remote_run_dir}"
-        )
-
         if out_dir is not None:
             _download_remote_run(remote_run_dir, out_dir, "Merge-chain results")
         return
@@ -526,15 +469,6 @@ def submit_iggm_task(
         num_samples=num_samples,
         relax=relax,
         max_antigen_size=max_antigen_size,
-    )
-
-    print(
-        f"🧬 Results saved to '{remote_run_dir}' "
-        f"in Modal volume '{APP_INFO.outputs_volume_name}'."
-    )
-    print(
-        "🧬 Download with: "
-        f"modal volume get {APP_INFO.outputs_volume_name} {remote_run_dir}"
     )
 
     if out_dir is not None:

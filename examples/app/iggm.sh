@@ -15,16 +15,16 @@ EPITOPE="7,8,9,10,11,12,13,14,108,109,110,111,112,113,114,115,116,118,157,158,16
 
 case "${TASK}" in
     download_models)
-        "${ENTRY_BIN}" r iggm -- \
+        "${ENTRY_BIN}" app r iggm -- \
             --download-models
         ;;
     force_download_models)
-        "${ENTRY_BIN}" r iggm -- \
+        "${ENTRY_BIN}" app r iggm -- \
             --download-models \
             --force-redownload
         ;;
     inverse_design)
-        "${ENTRY_BIN}" r iggm -- \
+        "${ENTRY_BIN}" app r iggm -- \
             --input-fasta "${DATA_DIR}/8hpu_M_N_A_CDR_H3.fasta" \
             --antigen "${DATA_DIR}/8hpu_M_N_A.pdb" \
             --epitope "${EPITOPE}" \
@@ -33,7 +33,7 @@ case "${TASK}" in
             --out-dir "${OUT_DIR}"
         ;;
     fr_design)
-        "${ENTRY_BIN}" r iggm -- \
+        "${ENTRY_BIN}" app r iggm -- \
             --input-fasta "${DATA_DIR}/1vfb_B_A_C.fasta" \
             --antigen "${DATA_DIR}/1vfb_B_A_C.pdb" \
             --task fr_design \
@@ -41,7 +41,7 @@ case "${TASK}" in
             --out-dir "${OUT_DIR}"
         ;;
     affinity_maturation)
-        "${ENTRY_BIN}" r iggm -- \
+        "${ENTRY_BIN}" app r iggm -- \
             --input-fasta "${DATA_DIR}/8hpu_M_N_A_CDR_H3.fasta" \
             --antigen "${DATA_DIR}/8hpu_M_N_A.pdb" \
             --fasta-origin "${DATA_DIR}/8hpu_M_N_A.fasta" \
@@ -51,7 +51,7 @@ case "${TASK}" in
             --out-dir "${OUT_DIR}"
         ;;
     cdr_h3_design|design)
-        "${ENTRY_BIN}" r iggm -- \
+        "${ENTRY_BIN}" app r iggm -- \
             --input-fasta "${DATA_DIR}/8hpu_M_N_A_CDR_H3.fasta" \
             --antigen "${DATA_DIR}/8hpu_M_N_A.pdb" \
             --task design \
@@ -59,7 +59,7 @@ case "${TASK}" in
             --out-dir "${OUT_DIR}"
         ;;
     cdr_all_design)
-        "${ENTRY_BIN}" r iggm -- \
+        "${ENTRY_BIN}" app r iggm -- \
             --input-fasta "${DATA_DIR}/8hpu_M_N_A_CDR_All.fasta" \
             --antigen "${DATA_DIR}/8hpu_M_N_A.pdb" \
             --task design \
@@ -67,7 +67,7 @@ case "${TASK}" in
             --out-dir "${OUT_DIR}"
         ;;
     epitope_design)
-        "${ENTRY_BIN}" r iggm -- \
+        "${ENTRY_BIN}" app r iggm -- \
             --input-fasta "${DATA_DIR}/8hpu_M_N_A_CDR_All.fasta" \
             --antigen "${DATA_DIR}/8hpu_M_N_A.pdb" \
             --epitope "${EPITOPE}" \
@@ -76,7 +76,7 @@ case "${TASK}" in
             --out-dir "${OUT_DIR}"
         ;;
     merge_chains)
-        "${ENTRY_BIN}" r iggm -- \
+        "${ENTRY_BIN}" app r iggm -- \
             --task merge_chains \
             --antigen "${DATA_DIR}/8ucd.pdb" \
             --antibody-ids H_L \
