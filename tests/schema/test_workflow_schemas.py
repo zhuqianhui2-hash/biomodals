@@ -44,7 +44,7 @@ def test_app_config_is_exported_from_schema_and_app_compatibility_module() -> No
 
     assert issubclass(CompatAppConfig, AppConfig)
     assert (
-        compat_config.model_dump(exclude={"output_volume", "output_volume_name"})
+        compat_config.model_dump(exclude={"output_volume"})
         == schema_config.model_dump()
     )
     assert compat_config.model_volume_subdir == "/demo"

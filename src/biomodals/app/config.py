@@ -18,12 +18,6 @@ class AppConfig(SchemaAppConfig):
 
     @computed_field
     @cached_property
-    def output_volume_name(self) -> str:
-        """Name of the output volume."""
-        return f"{self.name}-outputs"
-
-    @computed_field
-    @cached_property
     def output_volume(self) -> Volume:
         """Volume for storing outputs."""
         return Volume.from_name(

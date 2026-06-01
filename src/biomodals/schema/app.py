@@ -51,8 +51,18 @@ class AppConfig(BaseModel):
     timeout: int = 1800
     # Location to cache model weights and other large artifacts
     model_volume_mountpoint: str = "/biomodals-store"
-    # Location to mount output volume (if in use)
-    output_volume_mountpoint: str = "/biomodals-outputs"
+
+    @computed_field
+    @cached_property
+    def output_volume_name(self) -> str:
+        """Name of the output volume."""
+        return f"{self.name}-outputs"
+
+    @computed_field
+    @cached_property
+    def output_volume_mountpoint(self) -> str:
+        """Location to mount output volume (if in use)."""
+        return f"/mnt/{self.output_volume_name}"
 
     @computed_field
     @cached_property
