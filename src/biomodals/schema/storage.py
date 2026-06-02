@@ -72,4 +72,4 @@ class VolumePath(BaseModel):
 
     def __str__(self) -> str:
         """Return a human-readable string representation of this volume path."""
-        return f"'{self.path}' from volume '{self.volume_name}'"
+        return f"'{self.path}' in volume '{self.volume_name}'"

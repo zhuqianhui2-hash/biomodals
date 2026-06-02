@@ -361,6 +361,8 @@ def collect_boltzgen_data(
     memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
     timeout=MAX_TIMEOUT,
     volumes=CONF.mounts(output_volume=True, model_volume=True, is_huggingface=True),
+    retries=modal.Retries(initial_delay=4.0, max_retries=10),
+    single_use_containers=True,
 )
 class BoltzGenRunner:
     """Class to run BoltzGen on a YAML specification."""
@@ -394,6 +396,7 @@ class BoltzGenRunner:
         """
         import time
 
+        CONF.output_volume.reload()
         out_path = Path(out_dir)
         if _is_boltzgen_run_complete(out_path):
             return str(out_dir)
@@ -409,12 +412,13 @@ class BoltzGenRunner:
             CONF.output_volume.commit()
         try:
             lock_dir.mkdir(exist_ok=False)
-            CONF.output_volume.commit()
         except FileExistsError:
             print(
                 f"💊 Another worker is already running BoltzGen for {out_dir}; skipping."
             )
             return str(out_dir)
+        finally:
+            CONF.output_volume.commit()
 
         # Build command
         cmd = [
