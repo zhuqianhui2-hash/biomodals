@@ -35,9 +35,9 @@ CONF = AppConfig(
     tags={"group": Path(__file__).parent.name},
     name="BoltzGen",
     repo_url="https://github.com/y1zhou/boltzgen",
-    repo_commit_hash="09179d427ecce120c17b8336b9e50c091fab2147",
+    repo_commit_hash="b54ed4330a4dd3fbd6abe4bbcfe426284600f992",
     package_name="boltzgen",
-    version="0.3.1",
+    version="0.3.2",
     python_version="3.12",
     cuda_version="cu128",
     gpu=os.environ.get("GPU", "L40S"),
@@ -49,9 +49,9 @@ CONF = AppConfig(
 runtime_image = (
     modal.Image
     .debian_slim(python_version=CONF.python_version)
-    .apt_install("git", "build-essential", "zstd", "fd-find")
+    .apt_install("git", "build-essential")
     .env(CONF.default_env)
-    .uv_pip_install("polars[pandas,numpy,calamine,xlsxwriter]", "tqdm")
+    .uv_pip_install("tqdm")
     .uv_pip_install(f"git+{CONF.repo_url}@{CONF.repo_commit_hash}")
     .workdir(str(CONF.git_clone_dir))
     .pipe(patch_image_for_helper)
@@ -400,6 +400,7 @@ class BoltzGenRunner:
 
         # Make lock directory to prevent other GPU workers running the same job
         # Stale locks >1 day are ignored
+        out_path.mkdir(parents=True, exist_ok=True)
         lock_dir = out_path / ".lock"
         self.lock_dir = lock_dir
         if lock_dir.exists() and (lock_dir.stat().st_mtime < (time.time() - 24 * 3600)):
@@ -438,8 +439,14 @@ class BoltzGenRunner:
 
         out_path.mkdir(parents=True, exist_ok=True)
         log_path = out_path / "boltzgen-run.log"
-        print(f"💊 Running BoltzGen, saving logs to {log_path}")
-        run_command_with_log(cmd, log_file=log_path, cwd=out_path)
+        log_vol_path = volume_path_from_mount_path(
+            str(log_path), CONF.output_volume_mountpoint, CONF.output_volume_name
+        )
+        print(f"💊 Running BoltzGen, saving logs to {log_vol_path}")
+        try:
+            run_command_with_log(cmd, log_file=log_path, cwd=out_path)
+        finally:
+            CONF.output_volume.commit()
         return str(out_dir)
 
     @modal.exit()

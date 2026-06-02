@@ -127,7 +127,7 @@ def run_command_with_log(
     kwargs.setdefault("encoding", "utf-8")
     kwargs["env"] = _build_env(kwargs.get("env", None))
 
-    log_path = Path(log_file).expanduser().resolve()
+    log_path = Path(log_file).expanduser()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     banner = "=" * 100
     now = time()
