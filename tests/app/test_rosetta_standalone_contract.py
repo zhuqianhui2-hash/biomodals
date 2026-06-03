@@ -82,6 +82,6 @@ def test_rosetta_no_local_output_reports_volume_path(
     assert queued[0]["pdb"] == "demo-abc123/1/demo.pdb"
     assert deleted == ["Rosetta-queue-abc123"]
     assert (
-        "Results saved to 'demo-abc123' from volume 'Rosetta-outputs'"
+        "Results saved to 'demo-abc123' in volume 'Rosetta-outputs'"
         in capsys.readouterr().out
     )
