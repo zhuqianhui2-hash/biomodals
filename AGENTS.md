@@ -21,35 +21,13 @@
 
 ## Agent skills
 
-### Issue tracker
-
-Issues and PRDs are tracked in GitHub Issues for `y1zhou/biomodals`. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Use the default five-label triage vocabulary. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-This repo uses a single-context domain doc layout. See `docs/agents/domain.md`.
-
 ### Modal platform
 
 This repo is built on Modal, a serverless cloud platform for running Python code. See `docs/agents/modal.md`.
 
-### App development
-
-When creating, editing, or reviewing files under `src/biomodals/app/**/*_app.py`, use the repo-local `biomodals-app-development` skill. See `docs/agents/app-development.md`.
-
-### Workflow development
-
-When creating or editing reusable workflow runtime code under
-`src/biomodals/workflow/` or shared workflow schemas under
-`src/biomodals/schema/`, use the repo-local `biomodals-workflow-development`
-skill. See `docs/agents/workflow-development.md`.
-
 ## Biomodals app development
 
+When creating, editing, or reviewing files under `src/biomodals/app/**/*_app.py`, use the repo-local `biomodals-app-development` skill. See `docs/agents/app-development.md`.
 The detailed app-development standards are consolidated in `.agents/skills/biomodals-app-development/`.
 
 Use these apps as current implementation references:
@@ -61,6 +39,11 @@ Use these apps as current implementation references:
 When developing new apps that must violate the skill's conventions for good reason, document the reason for the deviation in `docs/agents/` and link that note from `docs/agents/app-development.md`.
 
 ## Biomodals workflow development
+
+When creating or editing reusable workflow runtime code under
+`src/biomodals/workflow/` or shared workflow schemas under
+`src/biomodals/schema/`, use the repo-local `biomodals-workflow-development`
+skill. See `docs/agents/workflow-development.md`.
 
 The detailed workflow-development standards are consolidated in `.agents/skills/biomodals-workflow-development/`.
 

@@ -30,9 +30,7 @@ def volume_path_from_mount_path(
             f"Remote path must be below mounted volume root {mount_root}: {remote_path}"
         )
     return VolumePath(
-        volume_name=volume_name,
-        path=str(relative_path),
-        media_type=media_type,
+        volume_name=volume_name, path=str(relative_path), media_type=media_type
     )
 
 

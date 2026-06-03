@@ -53,10 +53,8 @@ class AppConfig(SchemaAppConfig):
         if model_volume:
             from biomodals.helper.constant import MODEL_VOLUME
 
-            if model_mount_subdir:
-                sub_path = (
-                    "/huggingface" if is_huggingface else self.model_volume_subdir
-                )
+            if model_mount_subdir and not is_huggingface:
+                sub_path = self.model_volume_subdir
             else:
                 sub_path = None
 
