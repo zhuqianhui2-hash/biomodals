@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-try:
+if sys.version_info >= (3, 11):  # noqa: UP036
     from enum import StrEnum
-except ImportError:
-    from backports.strenum import StrEnum  # type: ignore[ty:unresolved-import] # noqa: UP035,I001
+else:
+    from backports.strenum import StrEnum  # noqa: UP035,I001
 
 
 class StorageKind(StrEnum):

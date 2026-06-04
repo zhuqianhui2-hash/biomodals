@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from functools import cached_property
 from pathlib import Path
 from typing import Any
@@ -11,10 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validat
 from biomodals.schema.storage import InlineBytes, VolumePath
 from biomodals.schema.workflow import ArtifactKind
 
-try:
+if sys.version_info >= (3, 11):  # noqa: UP036
     from enum import StrEnum
-except ImportError:
-    from backports.strenum import StrEnum  # type: ignore[ty:unresolved-import] # noqa: UP035,I001
+else:
+    from backports.strenum import StrEnum  # noqa: UP035,I001
 
 APP_CONFIG_MAX_TIMEOUT = 86_400
 
