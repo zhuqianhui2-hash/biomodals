@@ -20,6 +20,7 @@ from biomodals.schema import (
     VolumePath,
     WorkflowArtifact,
 )
+from biomodals.schema.storage import ZSTD_MEDIA_TYPE
 
 
 def _valid_app_config(**overrides: object) -> AppConfig:
@@ -143,7 +144,7 @@ def test_inline_bytes_allows_zstd_binary_data_round_trip() -> None:
                 storage=InlineBytes(
                     data=b"\xff\x00",
                     filename="packed.tar.zst",
-                    media_type="application/zstd",
+                    media_type=ZSTD_MEDIA_TYPE,
                 ),
             )
         ],
@@ -155,20 +156,22 @@ def test_inline_bytes_allows_zstd_binary_data_round_trip() -> None:
     assert "_wA=" in dumped
     assert isinstance(loaded.outputs[0].storage, InlineBytes)
     assert loaded.outputs[0].storage.data == b"\xff\x00"
-    assert loaded.outputs[0].storage.media_type == "application/zstd"
+    assert loaded.outputs[0].storage.media_type == ZSTD_MEDIA_TYPE
 
 
-def test_inline_bytes_rejects_binary_data_without_zstd_media_type() -> None:
-    with pytest.raises(ValidationError, match="UTF-8"):
-        InlineBytes(data=b"\xff\x00", filename="binary.bin")
+def test_inline_bytes_uses_pydantic_json_bytes_config() -> None:
+    payload = InlineBytes(data=b"\xff\x00", filename="binary.bin")
 
-    with pytest.raises(ValidationError, match="UTF-8"):
-        InlineBytes(
-            data=b"\xff\x00",
-            filename="binary.bin",
-            media_type="application/octet-stream",
-        )
+    dumped = payload.model_dump_json()
+    loaded = InlineBytes.model_validate_json(dumped)
 
+    assert InlineBytes.model_config["ser_json_bytes"] == "base64"
+    assert InlineBytes.model_config["val_json_bytes"] == "base64"
+    assert "_wA=" in dumped
+    assert loaded.data == b"\xff\x00"
+
+
+def test_inline_bytes_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError, match="archive_format"):
         InlineBytes(data=b"text", filename="archive.zip", archive_format="zip")  # type: ignore[ty:unknown-argument]
 

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 
 if sys.version_info >= (3, 11):  # noqa: UP036
     from enum import StrEnum
@@ -28,29 +28,13 @@ class InlineBytes(BaseModel):
     """Inline app output bytes before workflow materialization."""
 
     model_config = ConfigDict(
-        extra="forbid",
-        ser_json_bytes="base64",
-        val_json_bytes="base64",
+        extra="forbid", ser_json_bytes="base64", val_json_bytes="base64"
     )
 
     kind: Literal[StorageKind.INLINE_BYTES] = StorageKind.INLINE_BYTES
     data: bytes
     filename: str
     media_type: str | None = None
-
-    @model_validator(mode="after")
-    def ensure_supported_bytes(self) -> InlineBytes:
-        """Reject binary inline payloads unless they are zstd archives."""
-        if self.media_type == ZSTD_MEDIA_TYPE:
-            return self
-        try:
-            self.data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError(
-                "InlineBytes.data must be UTF-8 text unless media_type is "
-                f"{ZSTD_MEDIA_TYPE!r}."
-            ) from exc
-        return self
 
 
 class VolumePath(BaseModel):
