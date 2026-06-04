@@ -21,8 +21,21 @@ import modal
 from biomodals.app.config import AppConfig
 from biomodals.helper import patch_image_for_helper
 from biomodals.helper.constant import MAX_TIMEOUT, MODEL_VOLUME
-from biomodals.helper.shell import find_with_fd, package_outputs, run_command_with_log
+from biomodals.helper.shell import (
+    find_with_fd,
+    package_outputs,
+    run_command_with_log,
+    sanitize_filename,
+)
 from biomodals.helper.web import download_files
+from biomodals.schema import (
+    AppOutput,
+    AppRunResult,
+    AppRunStatus,
+    ArtifactKind,
+    InlineBytes,
+)
+from biomodals.schema.storage import ZSTD_MEDIA_TYPE
 
 ##########################################
 # Modal configs
@@ -209,13 +222,7 @@ def build_base_command(
     return cmd, workdir
 
 
-@app.function(
-    gpu=CONF.gpu,
-    memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
-    timeout=86400,
-    volumes=CONF.mounts(model_volume=True),
-)
-def ligandmpnn_run(
+def _ligandmpnn_run(
     run_name: str,
     script_mode: str,
     struct_bytes: bytes,
@@ -269,6 +276,49 @@ def ligandmpnn_run(
     print("💊 Packaging results...")
     tar_bytes = package_outputs(workdir, paths_to_bundle=["outputs", log_path.name])
     return tar_bytes
+
+
+@app.function(
+    gpu=CONF.gpu,
+    memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
+    timeout=86400,
+    volumes=CONF.mounts(model_volume=True),
+)
+def ligandmpnn_run(
+    run_name: str,
+    script_mode: str,
+    struct_bytes: bytes,
+    seeds: list[int],
+    cli_args: dict[str, str | int | float | bool],
+    bias_aa_per_residue_bytes: bytes | None = None,
+    omit_aa_per_residue_bytes: bytes | None = None,
+) -> AppRunResult:
+    """Run LigandMPNN and store a workflow-compatible archive result."""
+    safe_run_name = sanitize_filename(run_name)
+    tarball_bytes = _ligandmpnn_run(
+        run_name=safe_run_name,
+        script_mode=script_mode,
+        struct_bytes=struct_bytes,
+        seeds=seeds,
+        cli_args=cli_args,
+        bias_aa_per_residue_bytes=bias_aa_per_residue_bytes,
+        omit_aa_per_residue_bytes=omit_aa_per_residue_bytes,
+    )
+    return AppRunResult(
+        status=AppRunStatus.SUCCEEDED,
+        outputs=[
+            AppOutput(
+                name=f"{CONF.name}_outputs",
+                kind=ArtifactKind.ARCHIVE,
+                storage=InlineBytes(
+                    data=tarball_bytes,
+                    filename=f"{safe_run_name}_{CONF.name}.tar.zst",
+                    media_type=ZSTD_MEDIA_TYPE,
+                ),
+                metadata={"archive_format": "tar.zst", "run_name": safe_run_name},
+            )
+        ],
+    )
 
 
 ##########################################
@@ -394,6 +444,7 @@ def submit_ligandmpnn_task(
         )
     if run_name is None:
         run_name = input_path.stem
+    run_name = sanitize_filename(run_name)
 
     score_mode = script_mode == "score"
     seeds: list[int] = [
@@ -497,22 +548,29 @@ def submit_ligandmpnn_task(
         omit_AA_per_residue_bytes = omit_AA_per_res_path.read_bytes()
 
     download_weights.remote(force=force_download_models)
-    print("🧬 Running LigandMPNN...")
+    print(f"🧬 Running {CONF.name} {model_type=} {script_mode=}...")
     struct_bytes = input_path.read_bytes()
-    res_bytes = ligandmpnn_run.remote(
-        run_name,
-        script_mode,
-        struct_bytes,
-        seeds,
-        cli_args,
-        bias_AA_per_residue_bytes,
-        omit_AA_per_residue_bytes,
+    result = AppRunResult.model_validate(
+        ligandmpnn_run.remote(
+            run_name=run_name,
+            script_mode=script_mode,
+            struct_bytes=struct_bytes,
+            seeds=seeds,
+            cli_args=cli_args,
+            bias_aa_per_residue_bytes=bias_AA_per_residue_bytes,
+            omit_aa_per_residue_bytes=omit_AA_per_residue_bytes,
+        )
     )
+    output = next(
+        output for output in result.outputs if output.name == f"{CONF.name}_outputs"
+    )
+    if not isinstance(output.storage, InlineBytes):
+        raise TypeError(f"{CONF.name} workflow output should be inline .tar.zst bytes")
     local_out_dir = (
         Path(out_dir).expanduser() if out_dir is not None else Path.cwd() / run_name
     )
     local_out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"🧬 Downloading results for {run_name}...")
-    (local_out_dir / f"{run_name}.tar.zst").write_bytes(res_bytes)
+    (local_out_dir / output.storage.filename).write_bytes(output.storage.data)
     print(f"🧬 Results saved to: {local_out_dir.resolve()}")
