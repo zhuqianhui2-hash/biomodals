@@ -25,6 +25,35 @@ class UnexpectedRemoteFunction:
         )
 
 
+def test_build_ligandmpnn_cli_args_constructs_run_mode_args() -> None:
+    assert ligandmpnn_app.build_ligandmpnn_cli_args(
+        script_mode="run",
+        model_type="protein_mpnn",
+        batch_size=4,
+        number_of_batches=3,
+        parse_atoms_with_zero_occupancy=True,
+        pack_side_chains=True,
+        number_of_packs_per_design=5,
+        sc_num_samples=7,
+        repack_everything=True,
+        redesigned_residues="A1 A2",
+    ) == {
+        "--model_type": "protein_mpnn",
+        "--batch_size": "4",
+        "--number_of_batches": "3",
+        "--parse_atoms_with_zero_occupancy": True,
+        "--temperature": "0.1",
+        "--save_stats": "1",
+        "--pack_side_chains": True,
+        "--number_of_packs_per_design": "5",
+        "--repack_everything": True,
+        "--pack_with_ligand_context": True,
+        "--sc_num_denoising_steps": "3",
+        "--sc_num_samples": "7",
+        "--redesigned_residues": "A1 A2",
+    }
+
+
 def test_ligandmpnn_workflow_result_returns_inline_zstd_archive(
     monkeypatch,
 ) -> None:

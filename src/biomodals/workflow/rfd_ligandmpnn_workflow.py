@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import pickle
-import shlex
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,6 +57,7 @@ runtime_image = (
     modal.Image
     .debian_slim(python_version=CONF.python_version)
     .env(CONF.default_env)
+    .uv_pip_install("gemmi")
     .pipe(patch_image_for_helper, include_workflow_modules=True)
 )
 app = modal.App(CONF.name, image=runtime_image, tags=CONF.tags).include(
@@ -90,23 +90,31 @@ class RFDLigandMPNNModalNamespace:
     select_rfd_design: modal.Function
 
 
-def _pdb_residue_labels(pdb_bytes: bytes) -> list[str]:
+def _gemmi_residue_label(chain_name: str, seqid: object) -> str | None:
+    residue_number = getattr(seqid, "num", None)
+    if residue_number is None:
+        return None
+    insertion_code = str(getattr(seqid, "icode", "")).strip()
+    chain_id = chain_name.strip()
+    residue_id = f"{residue_number}{insertion_code}"
+    return f"{chain_id}{residue_id}" if chain_id else residue_id
+
+
+def _pdb_residue_labels(pdb_path: Path) -> list[str]:
+    import gemmi
+
+    structure = gemmi.read_structure(str(pdb_path))
+    structure.setup_entities()
+    if len(structure) == 0:
+        return []
     labels: list[str] = []
     seen: set[str] = set()
-    for line in pdb_bytes.decode("utf-8", errors="replace").splitlines():
-        if not line.startswith("ATOM"):
-            continue
-        chain_id = line[21:22].strip()
-        residue_number = line[22:26].strip()
-        insertion_code = line[26:27].strip()
-        if not residue_number:
-            continue
-        label = (
-            f"{chain_id}{residue_number}{insertion_code}"
-            if chain_id
-            else f"{residue_number}{insertion_code}"
-        )
-        if label not in seen:
+    for chain in structure[0]:
+        polymer = chain.get_polymer()
+        for residue in polymer.first_conformer():
+            label = _gemmi_residue_label(chain.name, residue.seqid)
+            if label is None or label in seen:
+                continue
             seen.add(label)
             labels.append(label)
     return labels
@@ -225,7 +233,7 @@ def select_rfdiffusion_design(
         raise TypeError(f"RFdiffusion TRB metadata must be a dict: {trb_path}")
     fixed_labels = _fixed_output_labels(trb_metadata)
     redesigned_labels = [
-        label for label in _pdb_residue_labels(pdb_bytes) if label not in fixed_labels
+        label for label in _pdb_residue_labels(pdb_path) if label not in fixed_labels
     ]
     if not redesigned_labels:
         raise ValueError(f"No redesigned residues inferred for {pdb_path}")
@@ -261,21 +269,19 @@ class RFdiffusionTrajectoryNode(AppBackedNode):
     def run(self, context: NodeRunContext) -> AppRunResult:
         """Run RFdiffusion and return the app-compatible output directory result."""
         safe_run_name = sanitize_filename(self.run_name)
-        overrides = [
-            f"inference.num_designs={int(self.num_designs)}",
-            f"denoiser.noise_scale_ca={self.noise_scale_ca}",
-            f"denoiser.noise_scale_frame={self.noise_scale_frame}",
-            f"contigmap.contigs=[{self.contigs}]",
-            f"ppi.hotspot_res=[{self.hotspot_res.replace(' ', ',')}]",
-        ]
-        if self.rfd_args.strip():
-            overrides.extend(shlex.split(self.rfd_args))
         return AppRunResult.model_validate(
             self.modal_namespace.rfdiffusion_infer.remote(
                 input_pdb_bytes=self.pdb_content,
                 input_pdb_name=self.input_pdb_name,
                 run_name=safe_run_name,
-                hydra_overrides=shlex.join(overrides),
+                hydra_overrides=rfdiffusion_app.build_rfdiffusion_hydra_overrides(
+                    contigs=self.contigs,
+                    num_designs=self.num_designs,
+                    hotspot_res=self.hotspot_res,
+                    noise_scale_ca=self.noise_scale_ca,
+                    noise_scale_frame=self.noise_scale_frame,
+                    rfd_args=self.rfd_args,
+                ),
             )
         )
 
@@ -321,19 +327,18 @@ class LigandMPNNDesignNode(AppBackedNode):
         if not isinstance(pdb_bytes, bytes):
             raise TypeError("RFdiffusion selector must return PDB bytes")
         redesigned_residues = str(selected["redesigned_residues"])
-        cli_args: dict[str, str | int | float | bool] = {
-            "--model_type": self.settings.model_type,
-            "--batch_size": str(self.settings.batch_size),
-            "--number_of_batches": str(self.settings.number_of_batches),
-            "--parse_atoms_with_zero_occupancy": True,
-            "--pack_side_chains": True,
-            "--number_of_packs_per_design": str(
-                self.settings.number_of_packs_per_design
-            ),
-            "--repack_everything": True,
-            "--sc_num_samples": str(self.settings.sc_num_samples),
-            "--redesigned_residues": redesigned_residues,
-        }
+        cli_args = ligandmpnn_app.build_ligandmpnn_cli_args(
+            script_mode="run",
+            model_type=self.settings.model_type,
+            batch_size=self.settings.batch_size,
+            number_of_batches=self.settings.number_of_batches,
+            parse_atoms_with_zero_occupancy=True,
+            pack_side_chains=True,
+            number_of_packs_per_design=self.settings.number_of_packs_per_design,
+            sc_num_samples=self.settings.sc_num_samples,
+            repack_everything=True,
+            redesigned_residues=redesigned_residues,
+        )
         result = AppRunResult.model_validate(
             self.modal_namespace.ligandmpnn_run.remote(
                 run_name=sanitize_filename(self.run_name),

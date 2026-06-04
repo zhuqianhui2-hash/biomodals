@@ -15,6 +15,24 @@ from biomodals.schema import (
 )
 
 
+def test_build_rfdiffusion_hydra_overrides_constructs_structured_args() -> None:
+    assert rfdiffusion_app.build_rfdiffusion_hydra_overrides(
+        contigs="100-150/0 E333-526",
+        num_designs=2,
+        hotspot_res="E405 E408",
+        noise_scale_ca=0.5,
+        noise_scale_frame=0.25,
+        rfd_args="diffuser.T=20",
+    ) == (
+        "inference.num_designs=2 "
+        "denoiser.noise_scale_ca=0.5 "
+        "denoiser.noise_scale_frame=0.25 "
+        "'contigmap.contigs=[100-150/0 E333-526]' "
+        "'ppi.hotspot_res=[E405,E408]' "
+        "diffuser.T=20"
+    )
+
+
 def test_rfdiffusion_workflow_result_references_cached_output_directory(
     tmp_path: Path,
     monkeypatch,

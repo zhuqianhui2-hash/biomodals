@@ -136,6 +136,11 @@ def torch_to_numpy(pt_file: str | Path) -> dict[str, Any]:
     return np_dict
 
 
+def parse_ligandmpnn_seeds(seeds: str) -> list[int]:
+    """Parse the local entrypoint seed string into LigandMPNN seed integers."""
+    return [int(s_num) for s in seeds.split(",") if (s_num := s.strip()).isdigit()]
+
+
 ##########################################
 # Fetch model weights
 ##########################################
@@ -324,6 +329,118 @@ def ligandmpnn_run(
 ##########################################
 # Entrypoint for ephemeral usage
 ##########################################
+def build_ligandmpnn_cli_args(
+    *,
+    script_mode: str,
+    model_type: str = "soluble_mpnn",
+    checkpoint: str | None = None,
+    batch_size: int = 1,
+    number_of_batches: int = 1,
+    temperature: float = 0.1,
+    ligand_mpnn_use_atom_context: bool = True,
+    ligand_mpnn_cutoff_for_score: float = 8.0,
+    ligand_mpnn_use_side_chain_context: bool = False,
+    global_transmembrane_label: bool = False,
+    parse_atoms_with_zero_occupancy: bool = False,
+    pack_side_chains: bool = False,
+    number_of_packs_per_design: int = 4,
+    sc_num_denoising_steps: int = 3,
+    sc_num_samples: int = 16,
+    repack_everything: bool = False,
+    pack_with_ligand_context: bool = True,
+    fixed_residues: str | None = None,
+    redesigned_residues: str | None = None,
+    bias_aa: str | None = None,
+    omit_aa: str | None = None,
+    symmetry_residues: str | None = None,
+    is_homo_oligomer: bool = False,
+    chains_to_design: str | None = None,
+    parse_these_chains_only: str | None = None,
+    transmembrane_buried: str | None = None,
+    transmembrane_interface: str | None = None,
+    use_sequence: bool = True,
+    autoregressive_score: bool = False,
+    single_aa_score: bool = True,
+) -> dict[str, str | int | float | bool]:
+    """Build LigandMPNN CLI args from local entrypoint/workflow settings."""
+    score_mode = script_mode == "score"
+    cli_args: dict[str, str | int | float | bool] = {
+        "--model_type": "protein_mpnn" if model_type == "abmpnn" else model_type,
+        "--batch_size": str(batch_size),
+        "--number_of_batches": str(number_of_batches),
+        "--parse_atoms_with_zero_occupancy": parse_atoms_with_zero_occupancy,
+    }
+    if model_type == "ligand_mpnn":
+        cli_args |= {
+            "--ligand_mpnn_use_atom_context": ligand_mpnn_use_atom_context,
+            "--ligand_mpnn_cutoff_for_score": str(ligand_mpnn_cutoff_for_score),
+            "--ligand_mpnn_use_side_chain_context": ligand_mpnn_use_side_chain_context,
+        }
+    if model_type == "global_label_membrane_mpnn":
+        cli_args["--global_transmembrane_label"] = global_transmembrane_label
+
+    if score_mode:
+        cli_args |= {
+            "--use_sequence": use_sequence,
+            "--autoregressive_score": autoregressive_score,
+            "--single_aa_score": single_aa_score,
+        }
+    else:
+        cli_args |= {"--temperature": str(temperature), "--save_stats": "1"}
+        if pack_side_chains:
+            cli_args |= {
+                "--pack_side_chains": pack_side_chains,
+                "--number_of_packs_per_design": str(number_of_packs_per_design),
+                "--repack_everything": repack_everything,
+                "--pack_with_ligand_context": pack_with_ligand_context,
+                "--sc_num_denoising_steps": str(sc_num_denoising_steps),
+                "--sc_num_samples": str(sc_num_samples),
+            }
+
+    if checkpoint is not None:
+        cli_args[f"--checkpoint_{model_type}"] = checkpoint
+    elif model_type == "abmpnn":
+        cli_args["--checkpoint_protein_mpnn"] = str(
+            Path(CONF.model_volume_mountpoint) / "abmpnn.pt"
+        )
+    if fixed_residues is not None:
+        cli_args["--fixed_residues"] = fixed_residues
+    if redesigned_residues is not None:
+        cli_args["--redesigned_residues"] = redesigned_residues
+    if symmetry_residues is not None:
+        cli_args["--symmetry_residues"] = symmetry_residues
+    if is_homo_oligomer:
+        cli_args["--homo_oligomer"] = "1"
+    if chains_to_design is not None:
+        cli_args["--chains_to_design"] = chains_to_design
+    if parse_these_chains_only is not None:
+        cli_args["--parse_these_chains_only"] = (
+            "".join(parse_these_chains_only.split(","))
+            if score_mode
+            else parse_these_chains_only
+        )
+    if transmembrane_buried is not None:
+        if model_type != "per_residue_label_membrane_mpnn":
+            print(
+                "⚠ --transmembrane_buried only applies when model_type == 'per_residue_label_membrane_mpnn'"
+            )
+        else:
+            cli_args["--transmembrane_buried"] = transmembrane_buried
+    if transmembrane_interface is not None:
+        if model_type != "per_residue_label_membrane_mpnn":
+            print(
+                "⚠ --transmembrane_interface only applies when model_type == 'per_residue_label_membrane_mpnn'"
+            )
+        else:
+            cli_args["--transmembrane_interface"] = transmembrane_interface
+
+    if bias_aa is not None and not score_mode:
+        cli_args["--bias_AA"] = bias_aa
+    if omit_aa is not None and not score_mode:
+        cli_args["--omit_AA"] = omit_aa
+    return cli_args
+
+
 @app.local_entrypoint()
 def submit_ligandmpnn_task(
     # Input and output
@@ -447,87 +564,38 @@ def submit_ligandmpnn_task(
     run_name = sanitize_filename(run_name)
 
     score_mode = script_mode == "score"
-    seeds: list[int] = [
-        int(s_num) for s in seeds.split(",") if (s_num := s.strip()).isdigit()
-    ]
-    cli_args = {
-        "--model_type": "protein_mpnn" if model_type == "abmpnn" else model_type,
-        "--batch_size": str(batch_size),
-        "--number_of_batches": str(number_of_batches),
-        "--parse_atoms_with_zero_occupancy": parse_atoms_with_zero_occupancy,
-    }
-    # 0/1 flags for specific models
-    if model_type == "ligand_mpnn":
-        cli_args |= {
-            "--ligand_mpnn_use_atom_context": ligand_mpnn_use_atom_context,
-            "--ligand_mpnn_cutoff_for_score": str(ligand_mpnn_cutoff_for_score),
-            "--ligand_mpnn_use_side_chain_context": ligand_mpnn_use_side_chain_context,
-        }
-    if model_type == "global_label_membrane_mpnn":
-        cli_args |= {
-            "--global_transmembrane_label": global_transmembrane_label,
-        }
-    # Mode-specific args
-    if score_mode:
-        cli_args |= {
-            "--use_sequence": use_sequence,
-            "--autoregressive_score": autoregressive_score,
-            "--single_aa_score": single_aa_score,
-        }
-    else:
-        cli_args |= {"--temperature": str(temperature), "--save_stats": "1"}
-        if pack_side_chains:
-            cli_args |= {
-                "--pack_side_chains": pack_side_chains,
-                "--number_of_packs_per_design": str(number_of_packs_per_design),
-                "--repack_everything": repack_everything,
-                "--pack_with_ligand_context": pack_with_ligand_context,
-                "--sc_num_denoising_steps": str(sc_num_denoising_steps),
-                "--sc_num_samples": str(sc_num_samples),
-            }
-    # Non-default args
-    if checkpoint is not None:
-        cli_args[f"--checkpoint_{model_type}"] = checkpoint
-    elif model_type == "abmpnn":
-        cli_args["--checkpoint_protein_mpnn"] = str(
-            Path(CONF.model_volume_mountpoint) / "abmpnn.pt"
-        )
-    if fixed_residues is not None:
-        cli_args["--fixed_residues"] = fixed_residues
-    if redesigned_residues is not None:
-        cli_args["--redesigned_residues"] = redesigned_residues
-    if symmetry_residues is not None:
-        cli_args["--symmetry_residues"] = symmetry_residues
-    if is_homo_oligomer:
-        cli_args["--homo_oligomer"] = "1"
-    if chains_to_design is not None:
-        cli_args["--chains_to_design"] = chains_to_design
-    if parse_these_chains_only is not None:
-        cli_args["--parse_these_chains_only"] = (
-            "".join(parse_these_chains_only.split(","))
-            if score_mode
-            else parse_these_chains_only
-        )
-    if transmembrane_buried is not None:
-        if model_type != "per_residue_label_membrane_mpnn":
-            print(
-                "⚠ --transmembrane_buried only applies when model_type == 'per_residue_label_membrane_mpnn'"
-            )
-        else:
-            cli_args["--transmembrane_buried"] = transmembrane_buried
-    if transmembrane_interface is not None:
-        if model_type != "per_residue_label_membrane_mpnn":
-            print(
-                "⚠ --transmembrane_interface only applies when model_type == 'per_residue_label_membrane_mpnn'"
-            )
-        else:
-            cli_args["--transmembrane_interface"] = transmembrane_interface
-
-    # Run-mode only args
-    if bias_aa is not None and not score_mode:
-        cli_args["--bias_AA"] = bias_aa
-    if omit_aa is not None and not score_mode:
-        cli_args["--omit_AA"] = omit_aa
+    cli_args = build_ligandmpnn_cli_args(
+        script_mode=script_mode,
+        model_type=model_type,
+        checkpoint=checkpoint,
+        batch_size=batch_size,
+        number_of_batches=number_of_batches,
+        temperature=temperature,
+        ligand_mpnn_use_atom_context=ligand_mpnn_use_atom_context,
+        ligand_mpnn_cutoff_for_score=ligand_mpnn_cutoff_for_score,
+        ligand_mpnn_use_side_chain_context=ligand_mpnn_use_side_chain_context,
+        global_transmembrane_label=global_transmembrane_label,
+        parse_atoms_with_zero_occupancy=parse_atoms_with_zero_occupancy,
+        pack_side_chains=pack_side_chains,
+        number_of_packs_per_design=number_of_packs_per_design,
+        sc_num_denoising_steps=sc_num_denoising_steps,
+        sc_num_samples=sc_num_samples,
+        repack_everything=repack_everything,
+        pack_with_ligand_context=pack_with_ligand_context,
+        fixed_residues=fixed_residues,
+        redesigned_residues=redesigned_residues,
+        bias_aa=bias_aa,
+        omit_aa=omit_aa,
+        symmetry_residues=symmetry_residues,
+        is_homo_oligomer=is_homo_oligomer,
+        chains_to_design=chains_to_design,
+        parse_these_chains_only=parse_these_chains_only,
+        transmembrane_buried=transmembrane_buried,
+        transmembrane_interface=transmembrane_interface,
+        use_sequence=use_sequence,
+        autoregressive_score=autoregressive_score,
+        single_aa_score=single_aa_score,
+    )
 
     bias_AA_per_residue_bytes = None
     if bias_aa_per_residue is not None and not score_mode:
@@ -555,7 +623,7 @@ def submit_ligandmpnn_task(
             run_name=run_name,
             script_mode=script_mode,
             struct_bytes=struct_bytes,
-            seeds=seeds,
+            seeds=parse_ligandmpnn_seeds(seeds),
             cli_args=cli_args,
             bias_aa_per_residue_bytes=bias_AA_per_residue_bytes,
             omit_aa_per_residue_bytes=omit_AA_per_residue_bytes,

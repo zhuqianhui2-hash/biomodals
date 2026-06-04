@@ -277,6 +277,30 @@ def bundle_rfdiffusion_outputs(run_name: str) -> bytes:
 # -------------------------
 # Local entrypoint (CLI)
 # -------------------------
+def build_rfdiffusion_hydra_overrides(
+    *,
+    contigs: str | None = None,
+    num_designs: int = 1,
+    hotspot_res: str | None = None,
+    noise_scale_ca: float = 1.0,
+    noise_scale_frame: float = 1.0,
+    rfd_args: str = "",
+) -> str:
+    """Build RFdiffusion Hydra override args from entrypoint/workflow settings."""
+    overrides: list[str] = [
+        f"inference.num_designs={int(num_designs)}",
+        f"denoiser.noise_scale_ca={noise_scale_ca}",
+        f"denoiser.noise_scale_frame={noise_scale_frame}",
+    ]
+    if contigs:
+        overrides.append(f"contigmap.contigs=[{contigs}]")
+    if hotspot_res:
+        overrides.append(f"ppi.hotspot_res=[{hotspot_res.replace(' ', ',')}]")
+    if rfd_args.strip():
+        overrides.extend(shlex.split(rfd_args))
+    return shlex.join(overrides)
+
+
 @app.local_entrypoint()
 def submit_rfdiffusion_task(
     run_name: str | None = None,
@@ -332,29 +356,14 @@ def submit_rfdiffusion_task(
     if not input_path.exists():
         raise FileNotFoundError(f"Input PDB not found: {input_pdb}")
 
-    # Build Hydra overrides string from structured arguments.
-    overrides: list[str] = [
-        f"inference.num_designs={int(num_designs)}",
-        f"denoiser.noise_scale_ca={noise_scale_ca}",
-        f"denoiser.noise_scale_frame={noise_scale_frame}",
-    ]
-
-    if contigs:
-        overrides.append(f"contigmap.contigs=[{contigs}]")  # keep as a single token
-    if hotspot_res:
-        # Accept "E405,E408" or "E405 E408"
-        hs = hotspot_res.replace(" ", ",")
-        overrides.append(f"ppi.hotspot_res=[{hs}]")
-
-    # Prefer extra_overrides; keep rfd_args as a deprecated escape hatch.
-    if rfd_args.strip():
-        overrides.extend(shlex.split(rfd_args))
-
-    if not overrides:
-        raise ValueError(
-            "At least one of 'contigs', 'num_designs', 'hotspot_res' or 'rfd_args' is required"
-        )
-    hydra_overrides = shlex.join(overrides)
+    hydra_overrides = build_rfdiffusion_hydra_overrides(
+        contigs=contigs,
+        num_designs=num_designs,
+        hotspot_res=hotspot_res,
+        noise_scale_ca=noise_scale_ca,
+        noise_scale_frame=noise_scale_frame,
+        rfd_args=rfd_args,
+    )
     pdb_bytes = input_path.read_bytes()
 
     local_out = Path(out_dir).expanduser().resolve() if out_dir else Path.cwd()

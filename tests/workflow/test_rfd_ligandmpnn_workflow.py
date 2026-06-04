@@ -11,7 +11,7 @@ from typing import Any, cast
 import modal
 import pytest
 
-from biomodals.app.design import rfdiffusion_app
+from biomodals.app.design import ligandmpnn_app, rfdiffusion_app
 from biomodals.schema import (
     AppOutput,
     AppRunResult,
@@ -67,7 +67,7 @@ def test_rfd_ligandmpnn_uses_dependency_app_metadata() -> None:
         "rfdiffusion",
         "ligandmpnn",
     )
-    assert rfd_ligandmpnn_workflow.CONF.tags == {"depends_on": "rfdiffusion,ligandmpnn"}
+    assert rfd_ligandmpnn_workflow.CONF.tags == {"depends_on": "rfdiffusion-ligandmpnn"}
     assert (
         rfd_ligandmpnn_workflow.RFDIFFUSION_OUTPUT_MOUNTPOINT
         == rfdiffusion_app.CONF.output_volume_mountpoint
@@ -196,10 +196,13 @@ def test_rfdiffusion_node_calls_app_function_with_hydra_overrides(
     assert calls["input_pdb_bytes"] == b"ATOM\n"
     assert calls["input_pdb_name"] == "input.pdb"
     assert calls["run_name"] == "demo-rfd001"
-    hydra_overrides = str(calls["hydra_overrides"])
-    assert "inference.num_designs=2" in hydra_overrides
-    assert "contigmap.contigs=[100-150/0 E333-526]" in hydra_overrides
-    assert "ppi.hotspot_res=[E405,E408]" in hydra_overrides
+    assert calls[
+        "hydra_overrides"
+    ] == rfdiffusion_app.build_rfdiffusion_hydra_overrides(
+        contigs="100-150/0 E333-526",
+        num_designs=2,
+        hotspot_res="E405 E408",
+    )
 
 
 def test_select_rfdiffusion_design_reads_pdb_trb_and_infers_redesigned_residues(
@@ -211,12 +214,17 @@ def test_select_rfdiffusion_design_reads_pdb_trb_and_infers_redesigned_residues(
     pdb_bytes = (
         b"ATOM      1  N   GLY A   1      0.000   0.000   0.000  1.00  0.00           N\n"
         b"ATOM      2  CA  GLY A   2      0.000   0.000   0.000  1.00  0.00           C\n"
-        b"ATOM      3  N   GLY B  10      0.000   0.000   0.000  1.00  0.00           N\n"
-        b"ATOM      4  CA  GLY B  11      0.000   0.000   0.000  1.00  0.00           C\n"
+        b"ATOM      3  N   GLY A   3      0.000   0.000   0.000  1.00  0.00           N\n"
+        b"ATOM      4  CA  GLY A   4      0.000   0.000   0.000  1.00  0.00           C\n"
+        b"ATOM      5  N   GLY B  10      0.000   0.000   0.000  1.00  0.00           N\n"
+        b"ATOM      6  CA  GLY B  11      0.000   0.000   0.000  1.00  0.00           C\n"
     )
     scaffolds_dir.joinpath("demo-rfd001_0.pdb").write_bytes(pdb_bytes)
     scaffolds_dir.joinpath("demo-rfd001_0.trb").write_bytes(
-        pickle.dumps({"complex_con_hal_pdb_idx": [("B", 10), ("B", 11)]})
+        pickle.dumps({
+            "con_hal_pdb_idx": [("A", 2), ("A", 3)],
+            "receptor_con_hal_pdb_idx": [("B", 10)],
+        })
     )
 
     class FakeVolume:
@@ -249,7 +257,7 @@ def test_select_rfdiffusion_design_reads_pdb_trb_and_infers_redesigned_residues(
         "pdb_name": "demo-rfd001_0.pdb",
         "pdb_bytes": pdb_bytes,
         "trb_name": "demo-rfd001_0.trb",
-        "redesigned_residues": "A1 A2",
+        "redesigned_residues": "A1 A4 B11",
     }
 
 
@@ -334,17 +342,18 @@ def test_ligandmpnn_node_selects_rfd_output_and_calls_ligandmpnn(
     assert ligandmpnn_calls["script_mode"] == "run"
     assert ligandmpnn_calls["struct_bytes"] == b"ATOM\n"
     assert ligandmpnn_calls["seeds"] == [7, 11]
-    assert ligandmpnn_calls["cli_args"] == {
-        "--model_type": "protein_mpnn",
-        "--batch_size": "4",
-        "--number_of_batches": "3",
-        "--parse_atoms_with_zero_occupancy": True,
-        "--pack_side_chains": True,
-        "--number_of_packs_per_design": "5",
-        "--repack_everything": True,
-        "--sc_num_samples": "7",
-        "--redesigned_residues": "A1 A2",
-    }
+    assert ligandmpnn_calls["cli_args"] == ligandmpnn_app.build_ligandmpnn_cli_args(
+        script_mode="run",
+        model_type="protein_mpnn",
+        batch_size=4,
+        number_of_batches=3,
+        parse_atoms_with_zero_occupancy=True,
+        pack_side_chains=True,
+        number_of_packs_per_design=5,
+        sc_num_samples=7,
+        repack_everything=True,
+        redesigned_residues="A1 A2",
+    )
     assert result.outputs[0].name == "LigandMPNN_outputs"
 
 
