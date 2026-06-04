@@ -28,7 +28,7 @@ because it is expected to be refactored.
   and `modal.App(...).include(orchestrator.app)`.
 - Declare app dependencies on `AppConfig.depends_on_apps`, mirror them into
   `CONF.tags["depends_on"]` for Modal UI metadata using a Modal-valid tag value
-  such as `",".join(DEPENDENCY_APPS)`, and compose them with
+  such as `"-".join(DEPENDENCY_APPS)`, and compose them with
   `include_dependency_apps(app, CONF.depends_on_apps)`.
 - Prefer included-app Modal handles over deployed-app lookup strings. Do not add
   `modal.Function.from_name(...)` to new workflow code when the dependency app

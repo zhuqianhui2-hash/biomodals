@@ -45,7 +45,7 @@ from biomodals.workflow.core import (
 
 DEPENDENCY_APPS = ("gromacs",)
 CONF = AppConfig(
-    tags={"depends_on": ",".join(DEPENDENCY_APPS)},
+    tags={"depends_on": "-".join(DEPENDENCY_APPS)},
     depends_on_apps=DEPENDENCY_APPS,
     name="ShortMDWorkflow",
     package_name="biomodals-shortmd-workflow",

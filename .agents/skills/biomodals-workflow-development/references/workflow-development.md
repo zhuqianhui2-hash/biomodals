@@ -309,14 +309,14 @@ dependency app names once on `AppConfig.depends_on_apps`, mirror that list into
 `CONF.tags["depends_on"]` for Modal UI visibility, and call
 `include_dependency_apps(app, CONF.depends_on_apps)` after including the shared
 orchestrator app. Modal tag values cannot contain commas, so use a Modal-valid
-delimiter such as `",".join(DEPENDENCY_APPS)`.
+delimiter such as `"-".join(DEPENDENCY_APPS)`.
 
 ```python
 DEPENDENCY_APPS = ("gromacs",)
 CONF = AppConfig(
     name="ShortMDWorkflow",
     depends_on_apps=DEPENDENCY_APPS,
-    tags={"depends_on": ",".join(DEPENDENCY_APPS)},
+    tags={"depends_on": "-".join(DEPENDENCY_APPS)},
 )
 
 app = modal.App(CONF.name, image=runtime_image, tags=CONF.tags).include(

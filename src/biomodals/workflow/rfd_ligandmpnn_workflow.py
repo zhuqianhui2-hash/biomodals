@@ -45,7 +45,7 @@ from biomodals.workflow.core import (
 
 DEPENDENCY_APPS = ("rfdiffusion", "ligandmpnn")
 CONF = AppConfig(
-    tags={"depends_on": ",".join(DEPENDENCY_APPS)},
+    tags={"depends_on": "-".join(DEPENDENCY_APPS)},
     depends_on_apps=DEPENDENCY_APPS,
     name="RFDLigandMPNNWorkflow",
     package_name="biomodals-rfd-ligandmpnn-workflow",

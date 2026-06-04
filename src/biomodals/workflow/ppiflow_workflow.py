@@ -43,7 +43,7 @@ PPI_FLOW_APP_STEPS = ("PPIFlowStep", "PartialStep")
 
 DEPENDENCY_APPS = ("ppiflow",)
 CONF = AppConfig(
-    tags={"depends_on": ",".join(DEPENDENCY_APPS)},
+    tags={"depends_on": "-".join(DEPENDENCY_APPS)},
     depends_on_apps=DEPENDENCY_APPS,
     name="PPIFlowWorkflow",
     package_name="biomodals-ppiflow-workflow",

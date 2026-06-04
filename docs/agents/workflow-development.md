@@ -26,7 +26,7 @@ skill:
   text-vs-zstd archive policy in workflow runtime materialization code.
 - When declaring dependency apps, mirror `AppConfig.depends_on_apps` into a
   Modal-valid `CONF.tags["depends_on"]` value such as
-  `",".join(DEPENDENCY_APPS)`, then call `include_dependency_apps(...)`.
+  `"-".join(DEPENDENCY_APPS)`, then call `include_dependency_apps(...)`.
 
 ## Maintenance
 
