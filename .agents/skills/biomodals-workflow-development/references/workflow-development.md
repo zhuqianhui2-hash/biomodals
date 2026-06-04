@@ -5,8 +5,12 @@ Use this guide when creating or changing files under
 `src/biomodals/schema/`.
 
 Use `src/biomodals/workflow/shortmd_workflow.py` as the primary end-to-end
-workflow example. Ignore `src/biomodals/workflow/ppiflow_workflow.py` as a
-reference pattern for now; it is expected to be refactored.
+workflow example. Use
+`src/biomodals/workflow/rfd_ligandmpnn_workflow.py` as the reference for
+workflows that select files from one app's volume-backed output and fan those
+files out into another app's workflow-compatible function. Ignore
+`src/biomodals/workflow/ppiflow_workflow.py` as a reference pattern for now; it
+is expected to be refactored.
 
 ## Vocabulary
 
@@ -52,6 +56,29 @@ DAG construction, build a static fan-out DAG, keep app-specific runtime work in
 included app functions, keep workflow-only adapters in the workflow module, and
 return durable artifacts as `AppRunResult` outputs.
 
+## RFD LigandMPNN Reference Pattern
+
+`rfd_ligandmpnn_workflow.py` is the current reference for workflows that chain
+workflow-compatible app functions across an app-owned output volume. Its data
+flow is:
+
+1. The local entrypoint reads one local PDB, sanitizes `run_id`, builds a static
+   fan-out DAG, and submits it to the included `WorkflowOrchestrator`.
+2. Each `RFdiffusionTrajectoryNode` calls the RFdiffusion app's
+   workflow-compatible remote function and receives a durable `VolumePath`
+   directory plus log artifact metadata.
+3. A workflow-native remote selector reads RFdiffusion PDB/TRB pairs from the
+   RFdiffusion output volume, using RFdiffusion metadata to derive the residues
+   downstream LigandMPNN should redesign.
+4. Each `LigandMPNNDesignNode` calls the LigandMPNN app's workflow-compatible
+   remote function with PDB bytes and MPNN CLI args, receiving a small inline
+   zstd archive that the workflow runtime materializes.
+5. The summary node reports all LigandMPNN archive artifacts.
+
+Use this pattern when the source app owns durable outputs but downstream nodes
+need selected small files or derived arguments. Keep selector/adaptation logic in
+the workflow module unless it is also useful to the standalone app.
+
 ## Schema Boundaries
 
 Shared contracts live in `biomodals.schema`.
@@ -66,10 +93,14 @@ the transition from `biomodals.app.config`.
 Workflow-compatible app functions return `AppRunResult`. The workflow runtime
 materializes each `AppOutput` into one or more `WorkflowArtifact` manifests.
 Inline byte outputs are for UTF-8 text bytes or small zstd archives with
-`media_type="application/zstd"`. They are materialized into the workflow run
-volume when the runtime records workflow artifacts. Other binary outputs,
-large archives, and non-text bytes must be written to deterministic volume paths
-and returned as `VolumePath` storage.
+`media_type="application/zstd"`. `InlineBytes` should rely on Pydantic's
+`ser_json_bytes` and `val_json_bytes` configuration for JSON byte encoding and
+decoding; keep text-vs-archive policy in the workflow runtime materialization
+layer rather than adding manual byte decoding validators to the shared schema.
+Inline byte outputs are materialized into the workflow run volume when the
+runtime records workflow artifacts. Other binary outputs, large archives, and
+non-text bytes must be written to deterministic volume paths and returned as
+`VolumePath` storage.
 
 `AppRunResult.logs` are durable workflow artifacts too. The runtime writes log
 outputs under `nodes/<node-id>/attempts/<attempt-id>/logs/` and records
@@ -277,7 +308,8 @@ Workflow scripts should compose every Modal app they need at import time. Define
 dependency app names once on `AppConfig.depends_on_apps`, mirror that list into
 `CONF.tags["depends_on"]` for Modal UI visibility, and call
 `include_dependency_apps(app, CONF.depends_on_apps)` after including the shared
-orchestrator app.
+orchestrator app. Modal tag values cannot contain commas, so use a Modal-valid
+delimiter such as `",".join(DEPENDENCY_APPS)`.
 
 ```python
 DEPENDENCY_APPS = ("gromacs",)
@@ -311,6 +343,11 @@ download or report outputs, print user messages, and return `None`.
 Workflow reuse happens through workflow-compatible remote app functions. These
 functions may reuse behavior from local entrypoints or existing remote
 functions, but they return `AppRunResult` and avoid local filesystem UX.
+When developing a new app that may be used by a workflow, ask whether it needs a
+workflow-compatible app function. If yes, coordinate with the app-development
+skill and use `rfdiffusion_app.py` as the reference for durable `VolumePath`
+outputs and `ligandmpnn_app.py` as the reference for small inline zstd archive
+outputs.
 
 For new Biomodals workflows that depend on other Biomodals apps, prefer
 included-app Modal handles over deployed-app lookup strings. Avoid

@@ -14,9 +14,12 @@ Before making non-trivial workflow changes, read
 `references/workflow-development.md` for the maintained standards.
 
 Use `src/biomodals/workflow/shortmd_workflow.py` as the primary end-to-end
-example for app-composed workflows. Ignore
-`src/biomodals/workflow/ppiflow_workflow.py` as a reference pattern for now; it
-is expected to be refactored.
+example for app-composed workflows. Use
+`src/biomodals/workflow/rfd_ligandmpnn_workflow.py` as the reference for
+workflows that fan out one app's volume-backed outputs into another app's
+workflow-compatible remote function. Ignore
+`src/biomodals/workflow/ppiflow_workflow.py` as a reference pattern for now
+because it is expected to be refactored.
 
 ## Working Rules
 
@@ -24,7 +27,8 @@ is expected to be refactored.
 - Compose workflow apps with `from biomodals.workflow.core import orchestrator`
   and `modal.App(...).include(orchestrator.app)`.
 - Declare app dependencies on `AppConfig.depends_on_apps`, mirror them into
-  `CONF.tags["depends_on"]` for Modal UI metadata, and compose them with
+  `CONF.tags["depends_on"]` for Modal UI metadata using a Modal-valid tag value
+  such as `",".join(DEPENDENCY_APPS)`, and compose them with
   `include_dependency_apps(app, CONF.depends_on_apps)`.
 - Prefer included-app Modal handles over deployed-app lookup strings. Do not add
   `modal.Function.from_name(...)` to new workflow code when the dependency app
@@ -43,6 +47,9 @@ is expected to be refactored.
   modules. Avoid duplicating volume strings in workflow scripts.
 - Use `volume_path_from_mount_path(...)` to convert mounted app paths into
   `VolumePath` workflow storage references.
+- When adding or changing workflow-compatible app functions, use RFdiffusion and
+  LigandMPNN as the current app-side reference implementations and coordinate
+  with the app-development skill.
 - Keep the core runtime slim. Add public orchestrator/runtime API only for clear
   missing capabilities, not one-off workflow conveniences.
 

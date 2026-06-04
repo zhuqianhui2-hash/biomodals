@@ -17,8 +17,15 @@ Before changing behavior, read the current repo guidance:
   - `src/biomodals/app/fold/alphafold3_app.py`
   - `src/biomodals/app/bioinfo/rosetta_app.py`
   - `src/biomodals/app/design/boltzgen_app.py`
+  - `src/biomodals/app/design/rfdiffusion_app.py` for durable,
+    workflow-compatible app outputs backed by an app output volume.
+  - `src/biomodals/app/design/ligandmpnn_app.py` for fast,
+    workflow-compatible rerunnable app outputs returned as inline zstd bytes.
 
 For new apps, ask the user which data-flow class applies before choosing architecture: short-lived inference, long-running/cached, or parallel/resumable. If the user already gave enough context, state the classification and proceed.
+Also ask whether the app must be workflow-compatible. If yes, follow the
+workflow-compatible app guidance in the reference and use RFdiffusion or
+LigandMPNN as the closest implementation pattern.
 
 ## Implementation Rules
 
@@ -48,6 +55,9 @@ Keep app code compatible with `biomodals app help` and app discovery:
   only when they provide much more benefit than a primitive payload, and ensure
   the type is serializable by `cloudpickle`. For example, return paths as
   `str(path)` rather than `Path` objects.
+- For workflow-compatible remote functions, return `AppRunResult` with
+  `AppOutput` storage from `biomodals.schema`; keep local entrypoints CLI-only
+  and adapt them to consume the same app result object.
 - Add or update an example command under `examples/app/` when app behavior or invocation changes.
 
 ## Review Checklist
@@ -59,6 +69,10 @@ When reviewing or finishing an app change, check:
 - Runtime boundaries: dependencies used only inside Modal images stay lazily imported.
 - Volumes: model/cache mounts use app-specific subdirectories when practical; inference mounts are read-only unless the tool writes caches there; writable volumes are committed after writes; mounted volume paths are logged or returned as `VolumePath` when they cross app/workflow boundaries.
 - Data flow: quick jobs return `.tar.zst` bytes via `package_outputs(...)`; persistent, resumable, or batch jobs use `CONF.output_volume`, `CONF.mounts(output_volume=True)`, or shared volumes.
+- Workflow compatibility: if requested, add a remote function that returns
+  `AppRunResult`; use `VolumePath` for durable/cached outputs and `InlineBytes`
+  with `media_type="application/zstd"` only for small zstd archives that are
+  cheap to pass through the workflow runtime.
 - Modal return payloads: prefer primitive, `cloudpickle`-serializable values;
   avoid returning `Path` objects directly or nested inside tuples, lists, dicts,
   or dataclasses.

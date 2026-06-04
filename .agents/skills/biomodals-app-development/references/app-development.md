@@ -159,6 +159,15 @@ Always specify a timeout with `CONF.timeout` or `MAX_TIMEOUT`. Add resource hint
 - Workflow-compatible app functions are the main exception to the primitive
   preference: return `AppRunResult` from `biomodals.schema` so workflows can
   materialize `AppOutput` artifacts consistently.
+- Before creating a new app or adding major app outputs, ask whether the app
+  needs to be workflow-compatible. If yes, design a remote function that returns
+  `AppRunResult`, keep the local entrypoint CLI-only, and update the local
+  entrypoint to consume the same result object while preserving local behavior.
+  Use `src/biomodals/app/design/rfdiffusion_app.py` as the reference for
+  durable/cached outputs returned as `VolumePath`, including log artifacts. Use
+  `src/biomodals/app/design/ligandmpnn_app.py` as the reference for fast,
+  rerunnable outputs returned as small `InlineBytes` zstd archives with
+  `media_type="application/zstd"`.
 - Keep `Path` objects internal to the local process or Modal container. Return
   file paths, volume paths, and relative output paths as `str(path)`, including
   paths nested inside tuples, lists, dicts, or dataclasses. Convert back with
@@ -236,9 +245,13 @@ Choose architecture by job type:
 - Parallel or interruptible runs should use queues, locks, stable run IDs, and resumable runners where possible.
 - Workflow-compatible app functions should reuse existing remote app behavior
   where practical, preserve standalone local entrypoints unchanged, and return
-  `AppRunResult` with `VolumePath` storage for durable outputs.
+  `AppRunResult` with `VolumePath` storage for durable outputs or `InlineBytes`
+  with `media_type="application/zstd"` for small zstd archives that are cheap
+  to rerun and pass through the workflow runtime.
 
 Before choosing data flow for a new app, ask whether it is short-lived inference, long-running/cached, or parallel/resumable unless already clear from the request.
+Also ask whether the app must be workflow-compatible unless the user has already
+said it will only be used through its standalone local entrypoint.
 
 ## Caching
 
@@ -258,5 +271,8 @@ Older apps can use raw constants such as `GPU`, `TIMEOUT`, and `APP_NAME`. When 
 - For Modal functions, verify returned payloads are primitive or otherwise
   intentionally complex and `cloudpickle`-serializable; convert returned paths to
   strings.
+- For workflow-compatible app functions, add focused tests that call
+  `get_raw_f()` or fake `.remote()` handles and assert the `AppRunResult`,
+  `AppOutput`, storage type, metadata, and unchanged local entrypoint behavior.
 - After edits, run `prek run --files <changed files>` when practical.
 - For CLI or app discovery changes, smoke test `uv run biomodals app list` and `uv run biomodals app help <app-name>` when practical.
