@@ -25,8 +25,17 @@ from biomodals.helper.shell import (
     find_with_fd,
     package_outputs,
     run_command_with_log,
+    sanitize_filename,
 )
 from biomodals.helper.web import download_files
+from biomodals.schema import (
+    AppOutput,
+    AppRunResult,
+    AppRunStatus,
+    ArtifactKind,
+    InlineBytes,
+)
+from biomodals.schema.storage import ZSTD_MEDIA_TYPE
 
 ##########################################
 # Modal configs
@@ -36,12 +45,12 @@ CONF = AppConfig(
     name="LigandMPNN",
     repo_url="https://github.com/dauparas/LigandMPNN",
     repo_commit_hash="26ec57ac976ade5379920dbd43c7f97a91cf82de",
-    # https://github.com/dauparas/LigandMPNN/pull/45
     package_name="ligandmpnn",
     version="0.1.2",
     python_version="3.11",
     cuda_version="cu121",
     gpu=os.environ.get("GPU", "A10G"),
+    model_volume_mountpoint="/opt/LigandMPNN/model_params",
 )
 
 AVAILABLE_MODELS = {
@@ -82,9 +91,19 @@ AVAILABLE_MODELS = {
 runtime_image = (
     modal.Image
     .debian_slim(python_version=CONF.python_version)
-    .apt_install("git", "build-essential", "wget")
+    .apt_install("git", "build-essential")
     .env(CONF.default_env)
+    # https://github.com/dauparas/LigandMPNN/pull/45
+    # hardcodes the checkpoint paths, so we can't add paths for AbMPNN
     .uv_pip_install(f"{CONF.package_name}=={CONF.version}")
+    .run_commands(
+        " && ".join((
+            f"git clone {CONF.repo_url} {CONF.git_clone_dir}",
+            f"cd {CONF.git_clone_dir}",
+            f"git checkout {CONF.repo_commit_hash}",
+        ))
+    )
+    .env({"PYTHONPATH": str(CONF.git_clone_dir)})
     .pipe(patch_image_for_helper)
 )
 
@@ -117,13 +136,18 @@ def torch_to_numpy(pt_file: str | Path) -> dict[str, Any]:
     return np_dict
 
 
+def parse_ligandmpnn_seeds(seeds: str) -> list[int]:
+    """Parse the local entrypoint seed string into LigandMPNN seed integers."""
+    return [int(s_num) for s in seeds.split(",") if (s_num := s.strip()).isdigit()]
+
+
 ##########################################
 # Fetch model weights
 ##########################################
 @app.function(
     volumes=CONF.mounts(model_volume=True, model_ro=False), timeout=MAX_TIMEOUT
 )
-def download_weights() -> None:
+def download_weights(force: bool) -> None:
     """Download ProteinMPNN models into the mounted volume.
 
     Ref: https://github.com/dauparas/LigandMPNN/blob/main/get_model_params.sh
@@ -132,17 +156,20 @@ def download_weights() -> None:
     base_url = "https://files.ipd.uw.edu/pub/ligandmpnn"
     model_dir = Path(CONF.model_volume_mountpoint)
     ligandmpnn_weights = {
-        f"{base_url}/{model_name}": model_dir / "model_params" / model_name
+        f"{base_url}/{model_name}": model_dir / model_name
         for model_name in AVAILABLE_MODELS
     }
     abmpnn_dict = {
         "https://zenodo.org/records/8164693/files/abmpnn.pt?download=1": model_dir
-        / "model_params"
         / "abmpnn.pt"
     }
 
-    print(f"💊 Downloading {CONF.name} models...")
-    download_files(ligandmpnn_weights | abmpnn_dict)
+    print(f"💊 Checking {CONF.name} models...")
+    download_files(
+        ligandmpnn_weights | abmpnn_dict,
+        force=force,
+        progress_bar_desc="Checkpoint download",
+    )
     MODEL_VOLUME.commit()
     print("💊 Model download complete")
 
@@ -163,7 +190,7 @@ def build_base_command(
     import tempfile
     from pathlib import Path
 
-    workdir = Path(tempfile.gettempdir()) / f"{run_name}-{script_mode}"
+    workdir = Path(tempfile.gettempdir()) / run_name
     for d in ("inputs", "outputs"):
         (workdir / d).mkdir(parents=True, exist_ok=True)
 
@@ -185,12 +212,12 @@ def build_base_command(
             f.write(omit_aa_per_residue_bytes)
             cli_args["--omit_AA_per_residue"] = str(omit_aa_per_res_file)
 
-    mod_name = (
-        f"{CONF.package_name}.{script_mode}"
-        if script_mode == "run"
-        else f"{CONF.package_name}.utils.{script_mode}"
-    )
-    cmd = [sys.executable, "-m", mod_name]
+    # mod_name = (
+    #     f"{CONF.package_name}.{script_mode}"
+    #     if script_mode == "run"
+    #     else f"{CONF.package_name}.utils.{script_mode}"
+    # ) ligandmpnn PyPI package
+    cmd = [sys.executable, str(CONF.git_clone_dir / f"{script_mode}.py")]
     for arg, val in cli_args.items():
         if isinstance(val, bool):
             cmd.extend([str(arg), str(int(val))])
@@ -200,13 +227,7 @@ def build_base_command(
     return cmd, workdir
 
 
-@app.function(
-    gpu=CONF.gpu,
-    memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
-    timeout=86400,
-    volumes=CONF.mounts(model_volume=True),
-)
-def ligandmpnn_run(
+def _ligandmpnn_run(
     run_name: str,
     script_mode: str,
     struct_bytes: bytes,
@@ -232,17 +253,17 @@ def ligandmpnn_run(
         omit_aa_per_residue_bytes,
     )
 
-    model_dir = Path(CONF.model_volume_mountpoint)
-    log_path = workdir / "ligandmpnn-run.log"
+    log_path = workdir / "ligandmpnn.log"
     print(f"💊 Running LigandMPNN, saving logs to {log_path}")
     for seed in tqdm(seeds, desc="Inference seeds"):
-        cmd = base_cmd + [
+        cmd = [
+            *base_cmd,
             "--seed",
             str(seed),
             "--out_folder",
             str(workdir / "outputs" / f"seed-{seed}"),
         ]
-        run_command_with_log(cmd, log_file=log_path, cwd=model_dir)
+        run_command_with_log(cmd, log_file=log_path, cwd=CONF.git_clone_dir)
 
     # Convert .pt outputs to numpy
     print("💊 Converting .pt outputs to numpy...")
@@ -262,10 +283,164 @@ def ligandmpnn_run(
     return tar_bytes
 
 
+@app.function(
+    gpu=CONF.gpu,
+    memory=(1024, 65536),  # reserve 1GB, OOM at 64GB
+    timeout=86400,
+    volumes=CONF.mounts(model_volume=True),
+)
+def ligandmpnn_run(
+    run_name: str,
+    script_mode: str,
+    struct_bytes: bytes,
+    seeds: list[int],
+    cli_args: dict[str, str | int | float | bool],
+    bias_aa_per_residue_bytes: bytes | None = None,
+    omit_aa_per_residue_bytes: bytes | None = None,
+) -> AppRunResult:
+    """Run LigandMPNN and store a workflow-compatible archive result."""
+    safe_run_name = sanitize_filename(run_name)
+    tarball_bytes = _ligandmpnn_run(
+        run_name=safe_run_name,
+        script_mode=script_mode,
+        struct_bytes=struct_bytes,
+        seeds=seeds,
+        cli_args=cli_args,
+        bias_aa_per_residue_bytes=bias_aa_per_residue_bytes,
+        omit_aa_per_residue_bytes=omit_aa_per_residue_bytes,
+    )
+    return AppRunResult(
+        status=AppRunStatus.SUCCEEDED,
+        outputs=[
+            AppOutput(
+                name=f"{CONF.name}_outputs",
+                kind=ArtifactKind.ARCHIVE,
+                storage=InlineBytes(
+                    data=tarball_bytes,
+                    filename=f"{safe_run_name}_{CONF.name}.tar.zst",
+                    media_type=ZSTD_MEDIA_TYPE,
+                ),
+                metadata={"archive_format": "tar.zst", "run_name": safe_run_name},
+            )
+        ],
+    )
+
+
 ##########################################
 # Entrypoint for ephemeral usage
 ##########################################
-# https://github.com/copilot/share/423a1120-4ba0-8023-9113-00096484408d
+def build_ligandmpnn_cli_args(
+    *,
+    script_mode: str,
+    model_type: str = "soluble_mpnn",
+    checkpoint: str | None = None,
+    batch_size: int = 1,
+    number_of_batches: int = 1,
+    temperature: float = 0.1,
+    ligand_mpnn_use_atom_context: bool = True,
+    ligand_mpnn_cutoff_for_score: float = 8.0,
+    ligand_mpnn_use_side_chain_context: bool = False,
+    global_transmembrane_label: bool = False,
+    parse_atoms_with_zero_occupancy: bool = False,
+    pack_side_chains: bool = False,
+    number_of_packs_per_design: int = 4,
+    sc_num_denoising_steps: int = 3,
+    sc_num_samples: int = 16,
+    repack_everything: bool = False,
+    pack_with_ligand_context: bool = True,
+    fixed_residues: str | None = None,
+    redesigned_residues: str | None = None,
+    bias_aa: str | None = None,
+    omit_aa: str | None = None,
+    symmetry_residues: str | None = None,
+    is_homo_oligomer: bool = False,
+    chains_to_design: str | None = None,
+    parse_these_chains_only: str | None = None,
+    transmembrane_buried: str | None = None,
+    transmembrane_interface: str | None = None,
+    use_sequence: bool = True,
+    autoregressive_score: bool = False,
+    single_aa_score: bool = True,
+) -> dict[str, str | int | float | bool]:
+    """Build LigandMPNN CLI args from local entrypoint/workflow settings."""
+    score_mode = script_mode == "score"
+    cli_args: dict[str, str | int | float | bool] = {
+        "--model_type": "protein_mpnn" if model_type == "abmpnn" else model_type,
+        "--batch_size": str(batch_size),
+        "--number_of_batches": str(number_of_batches),
+        "--parse_atoms_with_zero_occupancy": parse_atoms_with_zero_occupancy,
+    }
+    if model_type == "ligand_mpnn":
+        cli_args |= {
+            "--ligand_mpnn_use_atom_context": ligand_mpnn_use_atom_context,
+            "--ligand_mpnn_cutoff_for_score": str(ligand_mpnn_cutoff_for_score),
+            "--ligand_mpnn_use_side_chain_context": ligand_mpnn_use_side_chain_context,
+        }
+    if model_type == "global_label_membrane_mpnn":
+        cli_args["--global_transmembrane_label"] = global_transmembrane_label
+
+    if score_mode:
+        cli_args |= {
+            "--use_sequence": use_sequence,
+            "--autoregressive_score": autoregressive_score,
+            "--single_aa_score": single_aa_score,
+        }
+    else:
+        cli_args |= {"--temperature": str(temperature), "--save_stats": "1"}
+        if pack_side_chains:
+            cli_args |= {
+                "--pack_side_chains": pack_side_chains,
+                "--number_of_packs_per_design": str(number_of_packs_per_design),
+                "--repack_everything": repack_everything,
+                "--pack_with_ligand_context": pack_with_ligand_context,
+                "--sc_num_denoising_steps": str(sc_num_denoising_steps),
+                "--sc_num_samples": str(sc_num_samples),
+            }
+
+    if checkpoint is not None:
+        cli_args[f"--checkpoint_{model_type}"] = checkpoint
+    elif model_type == "abmpnn":
+        cli_args["--checkpoint_protein_mpnn"] = str(
+            Path(CONF.model_volume_mountpoint) / "abmpnn.pt"
+        )
+    if fixed_residues is not None:
+        cli_args["--fixed_residues"] = fixed_residues
+    if redesigned_residues is not None:
+        cli_args["--redesigned_residues"] = redesigned_residues
+    if symmetry_residues is not None:
+        cli_args["--symmetry_residues"] = symmetry_residues
+    if is_homo_oligomer:
+        cli_args["--homo_oligomer"] = "1"
+    if chains_to_design is not None:
+        cli_args["--chains_to_design"] = chains_to_design
+    if parse_these_chains_only is not None:
+        cli_args["--parse_these_chains_only"] = (
+            "".join(parse_these_chains_only.split(","))
+            if score_mode
+            else parse_these_chains_only
+        )
+    if transmembrane_buried is not None:
+        if model_type != "per_residue_label_membrane_mpnn":
+            print(
+                "⚠ --transmembrane_buried only applies when model_type == 'per_residue_label_membrane_mpnn'"
+            )
+        else:
+            cli_args["--transmembrane_buried"] = transmembrane_buried
+    if transmembrane_interface is not None:
+        if model_type != "per_residue_label_membrane_mpnn":
+            print(
+                "⚠ --transmembrane_interface only applies when model_type == 'per_residue_label_membrane_mpnn'"
+            )
+        else:
+            cli_args["--transmembrane_interface"] = transmembrane_interface
+
+    if bias_aa is not None and not score_mode:
+        cli_args["--bias_AA"] = bias_aa
+    if omit_aa is not None and not score_mode:
+        cli_args["--omit_AA"] = omit_aa
+    return cli_args
+
+
 @app.local_entrypoint()
 def submit_ligandmpnn_task(
     # Input and output
@@ -273,7 +448,7 @@ def submit_ligandmpnn_task(
     script_mode: str,
     out_dir: str | None = None,
     run_name: str | None = None,
-    download_models: bool = False,
+    force_download_models: bool = False,
     # Model configuration
     model_type: str = "soluble_mpnn",
     checkpoint: str | None = None,
@@ -317,7 +492,7 @@ def submit_ligandmpnn_task(
         script_mode: One of `run` or `score`
         out_dir: Local output directory; defaults to $PWD
         run_name: Name for this run; defaults to input structure stem
-        download_models: Whether to download model weights and skip running
+        force_download_models: Whether to download model weights even if they exist
 
         model_type: One of: protein_mpnn, ligand_mpnn, per_residue_label_membrane_mpnn,
             global_label_membrane_mpnn, soluble_mpnn, and abmpnn
@@ -376,12 +551,6 @@ def submit_ligandmpnn_task(
         single_aa_score: This only applies when using `script_mode` "score"!
             Run single amino acid scoring function: p(AA_i|backbone, AA_{all except ith one})
     """
-    from pathlib import Path
-
-    if download_models:
-        download_weights.remote()
-        return
-
     print("🧬 Checking input arguments...")
     input_path = Path(input_pdb).expanduser()
     if not input_path.exists():
@@ -392,83 +561,41 @@ def submit_ligandmpnn_task(
         )
     if run_name is None:
         run_name = input_path.stem
+    run_name = sanitize_filename(run_name)
 
     score_mode = script_mode == "score"
-    seeds: list[int] = [
-        int(s_num) for s in seeds.split(",") if (s_num := s.strip()).isdigit()
-    ]
-    cli_args = {
-        "--model_type": "protein_mpnn" if model_type == "abmpnn" else model_type,
-        "--batch_size": str(batch_size),
-        "--number_of_batches": str(number_of_batches),
-        # 0/1 flags
-        "--ligand_mpnn_use_atom_context": ligand_mpnn_use_atom_context,
-        "--ligand_mpnn_cutoff_for_score": str(ligand_mpnn_cutoff_for_score),
-        "--ligand_mpnn_use_side_chain_context": ligand_mpnn_use_side_chain_context,
-        "--global_transmembrane_label": global_transmembrane_label,
-        "--parse_atoms_with_zero_occupancy": parse_atoms_with_zero_occupancy,
-    }
-    # Mode-specific args
-    if score_mode:
-        cli_args |= {
-            "--use_sequence": use_sequence,
-            "--autoregressive_score": autoregressive_score,
-            "--single_aa_score": single_aa_score,
-        }
-    else:
-        cli_args |= {
-            "--temperature": str(temperature),
-            "--save_stats": "1",
-            "--pack_side_chains": pack_side_chains,
-            "--number_of_packs_per_design": str(number_of_packs_per_design),
-            "--sc_num_denoising_steps": str(sc_num_denoising_steps),
-            "--sc_num_samples": str(sc_num_samples),
-            "--repack_everything": repack_everything,
-            "--pack_with_ligand_context": pack_with_ligand_context,
-        }
-    # Non-default args
-    if checkpoint is not None:
-        cli_args[f"--checkpoint_{model_type}"] = checkpoint
-    elif model_type == "abmpnn":
-        cli_args["--checkpoint_protein_mpnn"] = str(
-            Path(CONF.model_volume_mountpoint) / "model_params" / "abmpnn.pt"
-        )
-    if fixed_residues is not None:
-        cli_args["--fixed_residues"] = fixed_residues
-    if redesigned_residues is not None:
-        cli_args["--redesigned_residues"] = redesigned_residues
-    if symmetry_residues is not None:
-        cli_args["--symmetry_residues"] = symmetry_residues
-    if is_homo_oligomer:
-        cli_args["--homo_oligomer"] = "1"
-    if chains_to_design is not None:
-        cli_args["--chains_to_design"] = chains_to_design
-    if parse_these_chains_only is not None:
-        cli_args["--parse_these_chains_only"] = (
-            "".join(parse_these_chains_only.split(","))
-            if score_mode
-            else parse_these_chains_only
-        )
-    if transmembrane_buried is not None:
-        if model_type != "per_residue_label_membrane_mpnn":
-            print(
-                "⚠ --transmembrane_buried only applies when model_type == 'per_residue_label_membrane_mpnn'"
-            )
-        else:
-            cli_args["--transmembrane_buried"] = transmembrane_buried
-    if transmembrane_interface is not None:
-        if model_type != "per_residue_label_membrane_mpnn":
-            print(
-                "⚠ --transmembrane_interface only applies when model_type == 'per_residue_label_membrane_mpnn'"
-            )
-        else:
-            cli_args["--transmembrane_interface"] = transmembrane_interface
-
-    # Run-mode only args
-    if bias_aa is not None and not score_mode:
-        cli_args["--bias_AA"] = bias_aa
-    if omit_aa is not None and not score_mode:
-        cli_args["--omit_AA"] = omit_aa
+    cli_args = build_ligandmpnn_cli_args(
+        script_mode=script_mode,
+        model_type=model_type,
+        checkpoint=checkpoint,
+        batch_size=batch_size,
+        number_of_batches=number_of_batches,
+        temperature=temperature,
+        ligand_mpnn_use_atom_context=ligand_mpnn_use_atom_context,
+        ligand_mpnn_cutoff_for_score=ligand_mpnn_cutoff_for_score,
+        ligand_mpnn_use_side_chain_context=ligand_mpnn_use_side_chain_context,
+        global_transmembrane_label=global_transmembrane_label,
+        parse_atoms_with_zero_occupancy=parse_atoms_with_zero_occupancy,
+        pack_side_chains=pack_side_chains,
+        number_of_packs_per_design=number_of_packs_per_design,
+        sc_num_denoising_steps=sc_num_denoising_steps,
+        sc_num_samples=sc_num_samples,
+        repack_everything=repack_everything,
+        pack_with_ligand_context=pack_with_ligand_context,
+        fixed_residues=fixed_residues,
+        redesigned_residues=redesigned_residues,
+        bias_aa=bias_aa,
+        omit_aa=omit_aa,
+        symmetry_residues=symmetry_residues,
+        is_homo_oligomer=is_homo_oligomer,
+        chains_to_design=chains_to_design,
+        parse_these_chains_only=parse_these_chains_only,
+        transmembrane_buried=transmembrane_buried,
+        transmembrane_interface=transmembrane_interface,
+        use_sequence=use_sequence,
+        autoregressive_score=autoregressive_score,
+        single_aa_score=single_aa_score,
+    )
 
     bias_AA_per_residue_bytes = None
     if bias_aa_per_residue is not None and not score_mode:
@@ -488,24 +615,30 @@ def submit_ligandmpnn_task(
             )
         omit_AA_per_residue_bytes = omit_AA_per_res_path.read_bytes()
 
-    print("🧬 Running LigandMPNN...")
+    download_weights.remote(force=force_download_models)
+    print(f"🧬 Running {CONF.name} {model_type=} {script_mode=}...")
     struct_bytes = input_path.read_bytes()
-    res_bytes = ligandmpnn_run.remote(
-        run_name,
-        script_mode,
-        struct_bytes,
-        seeds,
-        cli_args,
-        bias_AA_per_residue_bytes,
-        omit_AA_per_residue_bytes,
+    result = AppRunResult.model_validate(
+        ligandmpnn_run.remote(
+            run_name=run_name,
+            script_mode=script_mode,
+            struct_bytes=struct_bytes,
+            seeds=parse_ligandmpnn_seeds(seeds),
+            cli_args=cli_args,
+            bias_aa_per_residue_bytes=bias_AA_per_residue_bytes,
+            omit_aa_per_residue_bytes=omit_AA_per_residue_bytes,
+        )
     )
+    output = next(
+        output for output in result.outputs if output.name == f"{CONF.name}_outputs"
+    )
+    if not isinstance(output.storage, InlineBytes):
+        raise TypeError(f"{CONF.name} workflow output should be inline .tar.zst bytes")
     local_out_dir = (
-        Path(out_dir).expanduser()
-        if out_dir is not None
-        else Path.cwd() / f"{run_name}-{script_mode}"
+        Path(out_dir).expanduser() if out_dir is not None else Path.cwd() / run_name
     )
     local_out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"🧬 Downloading results for {run_name}...")
-    (local_out_dir / f"{run_name}-{script_mode}.tar.zst").write_bytes(res_bytes)
+    (local_out_dir / output.storage.filename).write_bytes(output.storage.data)
     print(f"🧬 Results saved to: {local_out_dir.resolve()}")

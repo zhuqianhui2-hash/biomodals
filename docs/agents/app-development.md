@@ -11,6 +11,10 @@ The previous `.github/instructions/app-development.instructions.md` file has bee
 
 - Invoke or read the `biomodals-app-development` skill before creating, editing, or reviewing Biomodals app files.
 - Treat the skill as the baseline for app discovery, `AppConfig`, Modal image construction, helper usage, volumes, data flow, local entrypoint docstrings, examples, and smoke tests.
+- Before choosing the app architecture, ask whether the app needs to be
+  workflow-compatible unless the user has already answered that. If it does,
+  add a workflow-compatible remote function that returns `AppRunResult` and keep
+  local entrypoints CLI-only.
 - For app model/output volumes, prefer `CONF.mounts(...)`. For shared Modal
   volumes with custom mountpoints, mount only the needed subdirectory with
   `Volume.with_mount_options(sub_path=...)` and combine read-only and subpath
@@ -21,6 +25,12 @@ The previous `.github/instructions/app-development.instructions.md` file has bee
   - `src/biomodals/app/fold/alphafold3_app.py`
   - `src/biomodals/app/bioinfo/rosetta_app.py`
   - `src/biomodals/app/design/boltzgen_app.py`
+- For workflow-compatible app functions, compare against the current reference
+  implementations:
+  - `src/biomodals/app/design/rfdiffusion_app.py` for durable/cached outputs
+    returned as `VolumePath` plus log artifacts.
+  - `src/biomodals/app/design/ligandmpnn_app.py` for fast rerunnable outputs
+    returned as small inline zstd archives.
 - When adding workflow-compatible app functions, also follow
   `docs/agents/workflow-development.md`.
 

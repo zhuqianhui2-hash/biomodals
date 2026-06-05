@@ -16,8 +16,7 @@ from biomodals.helper.constant import (
 )
 from biomodals.schema import AppRunResult
 from biomodals.workflow.core.builder import Workflow
-from biomodals.workflow.core.nodes import NodeRunContext, WorkflowNode
-from biomodals.workflow.core.runtime import RemoteFunctionCall, WorkflowRuntime
+from biomodals.workflow.core.runtime import WorkflowRuntime
 
 CONF = AppConfig(
     tags={"group": "workflow"},
@@ -29,7 +28,6 @@ CONF = AppConfig(
 )
 OUT_VOLUME = WORKFLOW_ORCHESTRATOR_VOLUME
 OUT_VOLUME_NAME = WORKFLOW_ORCHESTRATOR_VOLUME_NAME
-REMOTE_NODE_FUNCTION_NAME = "run_node"
 
 runtime_image = (
     modal.Image
@@ -68,27 +66,12 @@ class WorkflowOrchestrator:
         if not isinstance(workflow, Workflow):
             raise TypeError("workflow must be a Workflow object")
 
-        def remote_node_runner(
-            node: WorkflowNode,
-            context: NodeRunContext,
-        ) -> RemoteFunctionCall:
-            function_call = self.run_node.spawn(node, context)
-            if not hasattr(function_call, "object_id") or not hasattr(
-                function_call, "get"
-            ):
-                raise TypeError(
-                    "Remote workflow node spawn did not return a FunctionCall"
-                )
-            return function_call
-
         OUT_VOLUME.reload()
         self._runtime = WorkflowRuntime(
             workflow=workflow,
             volume_root=Path(CONF.output_volume_mountpoint),
             workflow_volume_name=OUT_VOLUME_NAME,
             workflow_volume=OUT_VOLUME,
-            remote_node_runner=remote_node_runner,
-            remote_node_function_name=REMOTE_NODE_FUNCTION_NAME,
             function_call_resolver=modal.FunctionCall.from_id,
             max_ready_workers=max_ready_workers,
         )
@@ -96,19 +79,6 @@ class WorkflowOrchestrator:
             return self._runtime.run(run_id=run_id, force=force)
         finally:
             self._close_runtime()
-            OUT_VOLUME.commit()
-
-    @modal.method()
-    def run_node(
-        self,
-        node: WorkflowNode,
-        context: NodeRunContext,
-    ) -> AppRunResult:
-        """Run one failure-isolated workflow node in a separate Modal method call."""
-        OUT_VOLUME.reload()
-        try:
-            return node.run(context)
-        finally:
             OUT_VOLUME.commit()
 
     @modal.exit()

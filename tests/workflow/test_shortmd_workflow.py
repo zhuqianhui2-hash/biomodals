@@ -23,10 +23,10 @@ from biomodals.workflow.core.nodes import NodeRunContext
 from biomodals.workflow.shortmd_workflow import (
     ShortMDCloneNode,
     ShortMDGromacsSettings,
-    ShortMDModalNamespace,
     ShortMDPrepNode,
     ShortMDReplicateNode,
     ShortMDSummaryNode,
+    WorkflowModalNamespace,
     build_shortmd_workflow,
     clone_prepared_shortmd_run,
     discover_pdb_inputs,
@@ -40,8 +40,26 @@ class UnexpectedRemoteFunction:
         """Fail if the sentinel is invoked."""
         pytest.fail(f"Unexpected remote call: args={args}, kwargs={kwargs}")
 
+    def spawn(self, *args: object, **kwargs: object) -> object:
+        """Fail if the sentinel is spawned."""
+        pytest.fail(f"Unexpected spawn call: args={args}, kwargs={kwargs}")
+
 
 UNEXPECTED_REMOTE = cast(modal.Function, UnexpectedRemoteFunction())
+
+
+class FakeFunctionCall:
+    """Small FunctionCall stand-in for direct submission tests."""
+
+    def __init__(self, object_id: str, result: object | None = None) -> None:
+        """Initialize the fake call with a stable object id and result."""
+        self.object_id = object_id
+        self.result = result
+
+    def get(self, timeout: float | int | None = None) -> object:
+        """Return the fake result."""
+        _ = timeout
+        return self.result
 
 
 def test_shortmd_uses_gromacs_app_volume_metadata() -> None:
@@ -125,7 +143,7 @@ def test_build_shortmd_workflow_models_prep_replicate_summary_dependencies() -> 
         "prep_cpu_function_name",
         "prep_gpu_function_name",
     }.isdisjoint(prep_node.__dict__)
-    assert isinstance(prep_node.modal_namespace, ShortMDModalNamespace)
+    assert isinstance(prep_node.modal_namespace, WorkflowModalNamespace)
 
     assert isinstance(clone_node, ShortMDCloneNode)
     assert clone_node.placement == NodePlacement.REMOTE
@@ -172,10 +190,16 @@ def test_shortmd_prep_node_runs_gromacs_prepare_and_returns_artifact(
     events = []
 
     class FakePrepareFunction:
-        def remote(self, **kwargs: object) -> object:
+        def _record(self, **kwargs: object) -> str:
             events.append("prepare")
             prepare_kwargs.update(kwargs)
             return f"{gromacs_app.CONF.output_volume_mountpoint}/prepared/source"
+
+        def remote(self, **kwargs: object) -> object:
+            return self._record(**kwargs)
+
+        def spawn(self, **kwargs: object) -> FakeFunctionCall:
+            return FakeFunctionCall("fc-prepare", self._record(**kwargs))
 
     class FakeClearFunction:
         def remote(self, **kwargs: object) -> object:
@@ -183,7 +207,7 @@ def test_shortmd_prep_node_runs_gromacs_prepare_and_returns_artifact(
             clear_kwargs.update(kwargs)
             return None
 
-    modal_namespace = ShortMDModalNamespace(
+    modal_namespace = WorkflowModalNamespace(
         clear=cast(modal.Function, FakeClearFunction()),
         clone=UNEXPECTED_REMOTE,
         prepare_cpu=cast(modal.Function, FakePrepareFunction()),
@@ -253,6 +277,60 @@ def test_shortmd_prep_node_runs_gromacs_prepare_and_returns_artifact(
     assert result.outputs[0].metadata == {"stage": "prep", "run_name": "source"}
 
 
+def test_shortmd_prep_node_submits_gromacs_prepare_directly(tmp_path: Path) -> None:
+    prepare_kwargs = {}
+    clear_kwargs = {}
+    events = []
+
+    class FakePrepareFunction:
+        def spawn(self, **kwargs: object) -> FakeFunctionCall:
+            events.append("prepare")
+            prepare_kwargs.update(kwargs)
+            return FakeFunctionCall(
+                "fc-prepare",
+                f"{gromacs_app.CONF.output_volume_mountpoint}/prepared/source",
+            )
+
+    class FakeClearFunction:
+        def remote(self, **kwargs: object) -> object:
+            events.append("clear")
+            clear_kwargs.update(kwargs)
+            return None
+
+    node = ShortMDPrepNode(
+        pdb_content=b"ATOM\n",
+        run_name="../source",
+        modal_namespace=WorkflowModalNamespace(
+            clear=cast(modal.Function, FakeClearFunction()),
+            clone=UNEXPECTED_REMOTE,
+            prepare_cpu=cast(modal.Function, FakePrepareFunction()),
+            prepare_gpu=UNEXPECTED_REMOTE,
+            production_cpu=UNEXPECTED_REMOTE,
+            production_gpu=UNEXPECTED_REMOTE,
+            collect_stats=UNEXPECTED_REMOTE,
+        ),
+        overwrite_existing=True,
+        gromacs=ShortMDGromacsSettings(cpu_only=True),
+    )
+
+    submission = node.submit_remote(
+        NodeRunContext(
+            run_id="run-1",
+            node_id="prep-source",
+            attempt_id="attempt-1",
+            cache_dir=tmp_path / "cache",
+            inputs={},
+        )
+    )
+
+    assert submission.function_name == "prepare_tpr_cpu"
+    assert submission.function_call.object_id == "fc-prepare"
+    assert submission.metadata == {"stage": "prep", "run_name": "source"}
+    assert clear_kwargs == {"run_name": "source"}
+    assert prepare_kwargs["run_name"] == "source"
+    assert events == ["clear", "prepare"]
+
+
 def test_shortmd_prep_node_rejects_workdir_outside_gromacs_mount(
     tmp_path: Path,
     monkeypatch,
@@ -261,7 +339,10 @@ def test_shortmd_prep_node_rejects_workdir_outside_gromacs_mount(
         def remote(self, **kwargs: object) -> object:
             return "/outside-gromacs-output"
 
-    modal_namespace = ShortMDModalNamespace(
+        def spawn(self, **kwargs: object) -> FakeFunctionCall:
+            return FakeFunctionCall("fc-outside", self.remote(**kwargs))
+
+    modal_namespace = WorkflowModalNamespace(
         clear=UNEXPECTED_REMOTE,
         clone=UNEXPECTED_REMOTE,
         prepare_cpu=UNEXPECTED_REMOTE,
@@ -351,11 +432,17 @@ def test_shortmd_clone_node_clones_prepared_run_and_returns_artifact(
     clone_kwargs = {}
 
     class FakeCloneFunction:
-        def remote(self, **kwargs: object) -> object:
+        def _record(self, **kwargs: object) -> str:
             clone_kwargs.update(kwargs)
             return f"{gromacs_app.CONF.output_volume_mountpoint}/source-r001"
 
-    modal_namespace = ShortMDModalNamespace(
+        def remote(self, **kwargs: object) -> object:
+            return self._record(**kwargs)
+
+        def spawn(self, **kwargs: object) -> FakeFunctionCall:
+            return FakeFunctionCall("fc-clone", self._record(**kwargs))
+
+    modal_namespace = WorkflowModalNamespace(
         clear=UNEXPECTED_REMOTE,
         clone=cast(modal.Function, FakeCloneFunction()),
         prepare_cpu=UNEXPECTED_REMOTE,
@@ -420,6 +507,70 @@ def test_shortmd_clone_node_clones_prepared_run_and_returns_artifact(
     }
 
 
+def test_shortmd_clone_node_submits_clone_directly(tmp_path: Path) -> None:
+    clone_kwargs = {}
+
+    class FakeCloneFunction:
+        def spawn(self, **kwargs: object) -> FakeFunctionCall:
+            clone_kwargs.update(kwargs)
+            return FakeFunctionCall(
+                "fc-clone",
+                f"{gromacs_app.CONF.output_volume_mountpoint}/source-r001",
+            )
+
+    node = ShortMDCloneNode(
+        source_run_name="source",
+        replicate_run_name="source-r001",
+        modal_namespace=WorkflowModalNamespace(
+            clear=UNEXPECTED_REMOTE,
+            clone=cast(modal.Function, FakeCloneFunction()),
+            prepare_cpu=UNEXPECTED_REMOTE,
+            prepare_gpu=UNEXPECTED_REMOTE,
+            production_cpu=UNEXPECTED_REMOTE,
+            production_gpu=UNEXPECTED_REMOTE,
+            collect_stats=UNEXPECTED_REMOTE,
+        ),
+        overwrite_clone=True,
+    )
+
+    submission = node.submit_remote(
+        NodeRunContext(
+            run_id="run-1",
+            node_id="clone-source-r001",
+            attempt_id="attempt-1",
+            cache_dir=tmp_path / "cache",
+            inputs={
+                "prepared": [
+                    WorkflowArtifact(
+                        artifact_id="source",
+                        producing_node_id="prep-source",
+                        kind=ArtifactKind.DIRECTORY,
+                        storage=VolumePath(
+                            volume_name=gromacs_app.CONF.output_volume_name,
+                            path="prepared/source",
+                        ),
+                        metadata={"stage": "prep", "run_name": "source"},
+                    )
+                ]
+            },
+        )
+    )
+
+    assert submission.function_name == "clone_prepared_shortmd_run"
+    assert submission.function_call.object_id == "fc-clone"
+    assert submission.metadata == {
+        "stage": "clone",
+        "run_name": "source-r001",
+        "source_run_name": "source",
+    }
+    assert clone_kwargs == {
+        "source_storage_path": "prepared/source",
+        "source_run_name": "source",
+        "replicate_run_name": "source-r001",
+        "overwrite": True,
+    }
+
+
 def test_shortmd_replicate_node_runs_gromacs_production(
     tmp_path: Path,
     monkeypatch,
@@ -428,9 +579,15 @@ def test_shortmd_replicate_node_runs_gromacs_production(
     stats_kwargs = {}
 
     class FakeProductionFunction:
-        def remote(self, **kwargs: object) -> object:
+        def _record(self, **kwargs: object) -> str:
             production_kwargs.update(kwargs)
             return f"{gromacs_app.CONF.output_volume_mountpoint}/source-r001"
+
+        def remote(self, **kwargs: object) -> object:
+            return self._record(**kwargs)
+
+        def spawn(self, **kwargs: object) -> FakeFunctionCall:
+            return FakeFunctionCall("fc-production", self._record(**kwargs))
 
     class FakeStatsFunction:
         def remote(self, traj_prefix: str, **kwargs: object) -> object:
@@ -438,7 +595,7 @@ def test_shortmd_replicate_node_runs_gromacs_production(
             stats_kwargs.update(kwargs)
             return f"{gromacs_app.CONF.output_volume_mountpoint}/production/source-r001"
 
-    modal_namespace = ShortMDModalNamespace(
+    modal_namespace = WorkflowModalNamespace(
         clear=UNEXPECTED_REMOTE,
         clone=UNEXPECTED_REMOTE,
         prepare_cpu=UNEXPECTED_REMOTE,
@@ -512,6 +669,74 @@ def test_shortmd_replicate_node_runs_gromacs_production(
     )
     assert result.outputs[0].metadata["run_name"] == "source-r001"
     assert result.outputs[0].metadata["source_run_name"] == "source"
+
+
+def test_shortmd_replicate_node_submits_production_directly(tmp_path: Path) -> None:
+    production_kwargs = {}
+
+    class FakeProductionFunction:
+        def spawn(self, **kwargs: object) -> FakeFunctionCall:
+            production_kwargs.update(kwargs)
+            return FakeFunctionCall(
+                "fc-production",
+                f"{gromacs_app.CONF.output_volume_mountpoint}/source-r001",
+            )
+
+    node = ShortMDReplicateNode(
+        source_run_name="source",
+        replicate_run_name="source-r001",
+        modal_namespace=WorkflowModalNamespace(
+            clear=UNEXPECTED_REMOTE,
+            clone=UNEXPECTED_REMOTE,
+            prepare_cpu=UNEXPECTED_REMOTE,
+            prepare_gpu=UNEXPECTED_REMOTE,
+            production_cpu=cast(modal.Function, FakeProductionFunction()),
+            production_gpu=UNEXPECTED_REMOTE,
+            collect_stats=UNEXPECTED_REMOTE,
+        ),
+        gromacs=ShortMDGromacsSettings(cpu_only=True),
+    )
+
+    submission = node.submit_remote(
+        NodeRunContext(
+            run_id="run-1",
+            node_id="replicate-source-r001",
+            attempt_id="attempt-1",
+            cache_dir=tmp_path / "cache",
+            inputs={
+                "cloned": [
+                    WorkflowArtifact(
+                        artifact_id="source-r001",
+                        producing_node_id="clone-source-r001",
+                        kind=ArtifactKind.DIRECTORY,
+                        storage=VolumePath(
+                            volume_name=gromacs_app.CONF.output_volume_name,
+                            path="source-r001",
+                        ),
+                        metadata={
+                            "stage": "clone",
+                            "run_name": "source-r001",
+                            "source_run_name": "source",
+                        },
+                    )
+                ]
+            },
+        )
+    )
+
+    assert submission.function_name == "production_run_cpu"
+    assert submission.function_call.object_id == "fc-production"
+    assert submission.metadata == {
+        "stage": "production",
+        "run_name": "source-r001",
+        "source_run_name": "source",
+    }
+    assert production_kwargs == {
+        "run_name": "source-r001",
+        "simulation_time_ns": 2,
+        "num_threads": 16,
+        "use_openmp_threads": False,
+    }
 
 
 def test_shortmd_summary_node_emits_markdown_manifest(tmp_path: Path) -> None:
@@ -659,6 +884,47 @@ def test_submit_shortmd_workflow_uses_included_orchestrator_class_boundary(
     assert "Submitting ShortMD workflow 'shortmd-run'" in stdout
     assert "1 input PDB(s)" in stdout
     assert "1 replicate(s)" in stdout
+
+
+def test_submit_shortmd_workflow_dry_run_prints_dag_without_orchestrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    input_dir = tmp_path / "pdbs"
+    input_dir.mkdir()
+    input_dir.joinpath("alpha.pdb").write_text("ATOM\n", encoding="utf-8")
+
+    class UnexpectedWorkflowOrchestrator:
+        def __init__(self) -> None:
+            pytest.fail("dry-run should not construct the orchestrator")
+
+    monkeypatch.setattr(
+        shortmd_workflow.orchestrator,
+        "WorkflowOrchestrator",
+        UnexpectedWorkflowOrchestrator,
+    )
+
+    raw_f = shortmd_workflow.submit_shortmd_workflow.info.raw_f
+    assert raw_f is not None
+    raw_f(
+        input_dir=str(input_dir),
+        run_id="shortmd-run",
+        replicates=1,
+        dry_run=True,
+    )
+
+    stdout = capsys.readouterr().out
+    assert "[workflow] DAG graph: node_id [placement; class] <- dependency" in stdout
+    assert (
+        "[workflow]   prep-shortmd-run-alpha [remote; ShortMDPrepNode] <- -" in stdout
+    )
+    assert (
+        "[workflow]   clone-shortmd-run-alpha-r001 "
+        "[remote; ShortMDCloneNode] <- prep-shortmd-run-alpha" in stdout
+    )
+    assert "shortmd_workflow.ShortMDPrepNode" not in stdout
+    assert "Submitting ShortMD workflow" not in stdout
 
 
 def test_submit_shortmd_workflow_propagates_force_to_gromacs_overwrite(
