@@ -213,18 +213,15 @@ def test_select_rfdiffusion_design_reads_pdb_trb_and_infers_redesigned_residues(
     scaffolds_dir.mkdir(parents=True)
     pdb_bytes = (
         b"ATOM      1  N   GLY A   1      0.000   0.000   0.000  1.00  0.00           N\n"
-        b"ATOM      2  CA  GLY A   2      0.000   0.000   0.000  1.00  0.00           C\n"
-        b"ATOM      3  N   GLY A   3      0.000   0.000   0.000  1.00  0.00           N\n"
+        b"ATOM      2  CA  GLY A   2      0.000   0.000   0.000  1.00 42.00           C\n"
+        b"ATOM      3  N   GLY A   3      0.000   0.000   0.000  1.00 42.00           N\n"
         b"ATOM      4  CA  GLY A   4      0.000   0.000   0.000  1.00  0.00           C\n"
-        b"ATOM      5  N   GLY B  10      0.000   0.000   0.000  1.00  0.00           N\n"
+        b"ATOM      5  N   GLY B  10      0.000   0.000   0.000  1.00 42.00           N\n"
         b"ATOM      6  CA  GLY B  11      0.000   0.000   0.000  1.00  0.00           C\n"
     )
     scaffolds_dir.joinpath("demo-rfd001_0.pdb").write_bytes(pdb_bytes)
     scaffolds_dir.joinpath("demo-rfd001_0.trb").write_bytes(
-        pickle.dumps({
-            "con_hal_pdb_idx": [("A", 2), ("A", 3)],
-            "receptor_con_hal_pdb_idx": [("B", 10)],
-        })
+        pickle.dumps({"mask_1d": [0, 1, 1, 0, 1, 0]})
     )
 
     class FakeVolume:
@@ -259,6 +256,46 @@ def test_select_rfdiffusion_design_reads_pdb_trb_and_infers_redesigned_residues(
         "trb_name": "demo-rfd001_0.trb",
         "redesigned_residues": "A1 A4 B11",
     }
+
+
+def test_select_rfdiffusion_design_uses_mask_1d_without_complex_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scaffolds_dir = tmp_path / "demo-rfd001" / "rfd-scaffolds"
+    scaffolds_dir.mkdir(parents=True)
+    pdb_bytes = (
+        b"ATOM      1  N   GLY A   1      0.000   0.000   0.000  1.00  0.00           N\n"
+        b"ATOM      2  CA  GLY A   2      0.000   0.000   0.000  1.00 42.00           C\n"
+        b"ATOM      3  N   GLY A   3      0.000   0.000   0.000  1.00  0.00           N\n"
+    )
+    scaffolds_dir.joinpath("demo-rfd001_0.pdb").write_bytes(pdb_bytes)
+    scaffolds_dir.joinpath("demo-rfd001_0.trb").write_bytes(
+        pickle.dumps({"mask_1d": [0, 1, 0]})
+    )
+
+    class FakeVolume:
+        def reload(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        rfd_ligandmpnn_workflow,
+        "RFDIFFUSION_OUTPUT_MOUNTPOINT",
+        str(tmp_path),
+    )
+    monkeypatch.setattr(
+        rfd_ligandmpnn_workflow,
+        "RFDIFFUSION_OUTPUT_VOLUME",
+        FakeVolume(),
+    )
+
+    selected = select_rfdiffusion_design.get_raw_f()(
+        rfd_output_storage_path="demo-rfd001/rfd-scaffolds",
+        rfd_run_name="demo-rfd001",
+        design_index=0,
+    )
+
+    assert selected["redesigned_residues"] == "A1 A3"
 
 
 def test_ligandmpnn_node_selects_rfd_output_and_calls_ligandmpnn(
@@ -450,5 +487,5 @@ def test_submit_rfd_ligandmpnn_workflow_uses_orchestrator_boundary(
     assert calls["spawn"]["force"] is False
     assert calls["spawn"]["max_ready_workers"] == 3
     stdout = capsys.readouterr().out
-    assert "Submitting RFdiffusion + LigandMPNN workflow 'demo'" in stdout
+    assert "Submitting RFDLigandMPNNWorkflow 'demo'" in stdout
     assert "1 RFdiffusion trajector" in stdout

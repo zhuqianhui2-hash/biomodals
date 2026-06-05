@@ -11,10 +11,9 @@ from __future__ import annotations
 
 import os
 import pickle
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import modal
 
@@ -90,111 +89,6 @@ class RFDLigandMPNNModalNamespace:
     select_rfd_design: modal.Function
 
 
-def _gemmi_residue_label(chain_name: str, seqid: object) -> str | None:
-    residue_number = getattr(seqid, "num", None)
-    if residue_number is None:
-        return None
-    insertion_code = str(getattr(seqid, "icode", "")).strip()
-    chain_id = chain_name.strip()
-    residue_id = f"{residue_number}{insertion_code}"
-    return f"{chain_id}{residue_id}" if chain_id else residue_id
-
-
-def _pdb_residue_labels(pdb_path: Path) -> list[str]:
-    import gemmi
-
-    structure = gemmi.read_structure(str(pdb_path))
-    structure.setup_entities()
-    if len(structure) == 0:
-        return []
-    labels: list[str] = []
-    seen: set[str] = set()
-    for chain in structure[0]:
-        polymer = chain.get_polymer()
-        for residue in polymer.first_conformer():
-            label = _gemmi_residue_label(chain.name, residue.seqid)
-            if label is None or label in seen:
-                continue
-            seen.add(label)
-            labels.append(label)
-    return labels
-
-
-def _as_python_value(value: object) -> object:
-    if hasattr(value, "item"):
-        try:
-            return value.item()  # type: ignore[no-any-return]
-        except ValueError:
-            pass
-    if hasattr(value, "tolist"):
-        return value.tolist()  # type: ignore[no-any-return]
-    return value
-
-
-def _residue_label(value: object) -> str | None:
-    value = _as_python_value(value)
-    if isinstance(value, bytes):
-        value = value.decode("utf-8")
-    if isinstance(value, str):
-        label = value.strip()
-        return label or None
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes):
-        parts = [_as_python_value(part) for part in value]
-        if len(parts) < 2 or tuple(parts[:2]) == ("_", "_"):
-            return None
-        chain_id = "" if parts[0] is None else str(parts[0]).strip()
-        residue_number = "" if parts[1] is None else str(parts[1]).strip()
-        if not residue_number:
-            return None
-        insertion_code = "" if len(parts) < 3 else str(parts[2]).strip()
-        return (
-            f"{chain_id}{residue_number}{insertion_code}"
-            if chain_id
-            else f"{residue_number}{insertion_code}"
-        )
-    return None
-
-
-def _labels_from_mapping(values: object) -> set[str]:
-    values = _as_python_value(values)
-    if not isinstance(values, Iterable) or isinstance(values, str | bytes):
-        return set()
-    return {label for value in values if (label := _residue_label(value)) is not None}
-
-
-def _fixed_output_labels(trb_metadata: dict[str, Any]) -> set[str]:
-    if "complex_con_hal_pdb_idx" in trb_metadata:
-        labels = _labels_from_mapping(trb_metadata["complex_con_hal_pdb_idx"])
-        if labels:
-            return labels
-    labels: set[str] = set()
-    for key in ("con_hal_pdb_idx", "receptor_con_hal_pdb_idx"):
-        labels.update(_labels_from_mapping(trb_metadata.get(key, ())))
-    return labels
-
-
-def _design_pdbs(scaffolds_dir: Path, rfd_run_name: str) -> list[Path]:
-    expected = scaffolds_dir / f"{rfd_run_name}_0.pdb"
-    if expected.exists():
-        return sorted(
-            scaffolds_dir.glob(f"{rfd_run_name}_*.pdb"),
-            key=lambda path: _design_index_from_name(path, rfd_run_name),
-        )
-    pdbs = sorted(scaffolds_dir.glob("*.pdb"))
-    if not pdbs:
-        raise FileNotFoundError(f"No RFdiffusion PDB outputs found in {scaffolds_dir}")
-    return pdbs
-
-
-def _design_index_from_name(path: Path, rfd_run_name: str) -> tuple[int, str]:
-    prefix = f"{rfd_run_name}_"
-    suffix = path.stem[len(prefix) :] if path.stem.startswith(prefix) else path.stem
-    try:
-        return int(suffix), path.name
-    except ValueError:
-        return 1_000_000, path.name
-
-
 @app.function(
     image=runtime_image,
     cpu=0.125,
@@ -203,20 +97,30 @@ def _design_index_from_name(path: Path, rfd_run_name: str) -> tuple[int, str]:
     volumes={RFDIFFUSION_OUTPUT_MOUNTPOINT: RFDIFFUSION_OUTPUT_VOLUME},
 )
 def select_rfdiffusion_design(
-    *,
-    rfd_output_storage_path: str,
-    rfd_run_name: str,
-    design_index: int,
+    *, rfd_output_storage_path: str, rfd_run_name: str, design_index: int
 ) -> dict[str, bytes | str]:
     """Read one RFdiffusion PDB/TRB pair and infer LigandMPNN redesign residues."""
     storage_path = VolumePath(
-        volume_name=RFDIFFUSION_OUTPUT_VOLUME_NAME,
-        path=rfd_output_storage_path,
+        volume_name=RFDIFFUSION_OUTPUT_VOLUME_NAME, path=rfd_output_storage_path
     ).path
     safe_run_name = sanitize_filename(rfd_run_name)
     RFDIFFUSION_OUTPUT_VOLUME.reload()
     scaffolds_dir = Path(RFDIFFUSION_OUTPUT_MOUNTPOINT) / storage_path
-    pdbs = _design_pdbs(scaffolds_dir, safe_run_name)
+
+    def design_sort_key(path: Path) -> tuple[int, str]:
+        prefix = f"{safe_run_name}_"
+        suffix = path.stem[len(prefix) :] if path.stem.startswith(prefix) else path.stem
+        try:
+            return int(suffix), path.name
+        except ValueError:
+            return 1_000_000, path.name
+
+    # Select PDB and TRB based on stable index
+    pdbs = sorted(scaffolds_dir.glob(f"{safe_run_name}_*.pdb"), key=design_sort_key)
+    if not pdbs:
+        pdbs = sorted(scaffolds_dir.glob("*.pdb"))
+    if not pdbs:
+        raise FileNotFoundError(f"No RFdiffusion PDB outputs found in {scaffolds_dir}")
     if design_index < 0 or design_index >= len(pdbs):
         raise IndexError(
             f"RFdiffusion design index {design_index} is out of range for "
@@ -227,14 +131,50 @@ def select_rfdiffusion_design(
     if not trb_path.exists():
         raise FileNotFoundError(f"RFdiffusion TRB metadata not found: {trb_path}")
     pdb_bytes = pdb_path.read_bytes()
+
     # TRB files are RFdiffusion's own pickled run metadata from the app volume.
+    # We parse the file to find the fixed residues and RFdiffusion-perturbed positions
     trb_metadata = pickle.loads(trb_path.read_bytes())  # noqa: S301
     if not isinstance(trb_metadata, dict):
         raise TypeError(f"RFdiffusion TRB metadata must be a dict: {trb_path}")
-    fixed_labels = _fixed_output_labels(trb_metadata)
-    redesigned_labels = [
-        label for label in _pdb_residue_labels(pdb_path) if label not in fixed_labels
-    ]
+    is_fixed: list[int] = trb_metadata.get("mask_1d", [])
+
+    # We use gemmi to parse the PDB and extract residue labels for comparison
+    # Also sanity check the B-factors of the perturbed positions
+    import gemmi
+
+    structure = gemmi.read_structure(str(pdb_path), format=gemmi.CoorFormat.Detect)
+    structure.setup_entities()
+    if len(structure) == 0:
+        raise ValueError(f"No model found in RFdiffusion PDB output: {pdb_path}")
+
+    fixed_labels: list[str] = []
+    redesigned_labels: list[str] = []
+    bfactor_mismatches: list[str] = []
+    idx: int = -1
+    for chain in structure[0]:
+        chain_id = chain.name.strip()
+        for residue in chain:
+            idx += 1
+            res_idx = residue.seqid.num  # assume icode is empty
+            if res_idx is None:
+                raise ValueError(f"Invalid residue ID in chain {chain_id}: {residue}")
+            label = f"{chain_id}{res_idx}"
+            residue_b_factor = float(max((atom.b_iso for atom in residue), default=0.0))
+            if is_fixed[idx]:
+                fixed_labels.append(label)
+                if residue_b_factor == 0.0:
+                    bfactor_mismatches.append(label)
+                continue
+            if residue_b_factor != 0.0:
+                bfactor_mismatches.append(label)
+            redesigned_labels.append(label)
+    if bfactor_mismatches:
+        print(
+            "💊 RFdiffusion redesign-set B-factor sanity check mismatches: "
+            f"{' '.join(bfactor_mismatches)}",
+            flush=True,
+        )
     if not redesigned_labels:
         raise ValueError(f"No redesigned residues inferred for {pdb_path}")
     return {
@@ -595,38 +535,25 @@ def submit_rfd_ligandmpnn_workflow(
         rfd_args=rfd_args,
         max_parallel=max_parallel,
     )
-    orchestrator_handle = orchestrator.WorkflowOrchestrator()
-    orchestrator_kwargs = {
-        "workflow": workflow,
-        "run_id": resolved_run_id,
-        "force": force,
-        "max_ready_workers": max_parallel,
-    }
     total_structures = num_rfdiffusion_trajectories * num_rfdiffusion_designs
     print(
-        f"Submitting RFdiffusion + LigandMPNN workflow '{resolved_run_id}' with "
+        f"Submitting {CONF.name} '{resolved_run_id}' with "
         f"{num_rfdiffusion_trajectories} RFdiffusion trajector"
         f"{'y' if num_rfdiffusion_trajectories == 1 else 'ies'}, "
         f"{num_rfdiffusion_designs} design(s) per trajectory, "
         f"{total_structures} LigandMPNN node(s)",
         flush=True,
     )
+    orchestrator_handle = orchestrator.WorkflowOrchestrator()
+    fc = orchestrator_handle.run.spawn(
+        workflow=workflow,
+        run_id=resolved_run_id,
+        force=force,
+        max_ready_workers=max_parallel,
+    )
     if wait:
-        result: AppRunResult | str = AppRunResult.model_validate(
-            orchestrator_handle.run.remote(**orchestrator_kwargs)
-        )
+        result: AppRunResult | str = AppRunResult.model_validate(fc.get())
+        print(f"{CONF.name} run finished with status: {result.status}", flush=True)
     else:
-        function_call = orchestrator_handle.run.spawn(**orchestrator_kwargs)
-        result = str(getattr(function_call, "object_id", function_call))
-    if isinstance(result, AppRunResult):
-        print(
-            "RFdiffusion + LigandMPNN workflow run finished with status: "
-            f"{result.status}",
-            flush=True,
-        )
-    else:
-        print(
-            "RFdiffusion + LigandMPNN workflow run submitted. FunctionCall id: "
-            f"{result}",
-            flush=True,
-        )
+        result = str(getattr(fc, "object_id", fc))
+        print(f"{CONF.name} run submitted. FunctionCall id: {result}", flush=True)
