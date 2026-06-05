@@ -495,6 +495,13 @@ def run_workflow(
             help="Timeout in seconds for the modal run. If not specified, use the workflow default.",
         ),
     ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Build the workflow and print its DAG graph without submitting it.",
+        ),
+    ] = False,
     flags: Annotated[
         list[str] | None,
         typer.Argument(help="Additional flags to pass to the workflow entrypoint."),
@@ -530,7 +537,11 @@ def run_workflow(
     if timeout is not None:
         env["TIMEOUT"] = str(timeout)
 
-    run_command([*cmd, *(flags or [])], env=env)
+    entrypoint_flags = list(flags or [])
+    if dry_run and "--dry-run" not in entrypoint_flags:
+        entrypoint_flags.insert(0, "--dry-run")
+
+    run_command([*cmd, *entrypoint_flags], env=env)
 
 
 @app_commands.command(

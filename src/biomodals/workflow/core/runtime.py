@@ -40,6 +40,20 @@ from biomodals.workflow.core.nodes import (
 FunctionCallResolver = Callable[[str], RemoteFunctionCall]
 
 
+def print_workflow_dag(definition: WorkflowDefinition) -> None:
+    """Print a compact workflow DAG graph."""
+    print("[workflow] DAG graph: node_id [placement; class] <- dependency", flush=True)
+    for node_id, spec in definition.nodes.items():
+        dependencies = sorted(definition.dependencies[node_id])
+        dependency_text = ", ".join(dependencies) if dependencies else "-"
+        node_class = spec.node.__class__.__qualname__
+        print(
+            f"[workflow]   {node_id} "
+            f"[{spec.node.placement.value}; {node_class}] <- {dependency_text}",
+            flush=True,
+        )
+
+
 class WorkflowVolume(Protocol):
     """Minimal Modal Volume boundary used by the workflow runtime."""
 
@@ -86,20 +100,7 @@ class WorkflowRuntime:
             f"with {len(definition.nodes)} node(s)",
             flush=True,
         )
-        print(
-            "[workflow] DAG graph: node_id [placement; class] <- dependency", flush=True
-        )
-        for node_id, spec in definition.nodes.items():
-            dependencies = sorted(definition.dependencies[node_id])
-            dependency_text = ", ".join(dependencies) if dependencies else "-"
-            node_class = (
-                f"{spec.node.__class__.__module__}.{spec.node.__class__.__qualname__}"
-            )
-            print(
-                f"[workflow]   {node_id} "
-                f"[{spec.node.placement.value}; {node_class}] <- {dependency_text}",
-                flush=True,
-            )
+        print_workflow_dag(definition)
         self._reload_volume()
         run_exists = self.ledger.run_exists(definition.name, run_id)
         if run_exists and force:

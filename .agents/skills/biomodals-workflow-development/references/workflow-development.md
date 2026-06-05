@@ -312,6 +312,13 @@ classes serialize with stable canonical module names before being submitted to
 the included `WorkflowOrchestrator`. Its user-facing flags should mirror
 `biomodals app run`, including Modal mode, detach, timeout, and pass-through
 workflow flags after `--`.
+The run command also exposes `--dry-run`, which forwards `--dry-run` to the
+selected workflow local entrypoint. User-facing workflow entrypoints should
+accept `dry_run: bool = False`; when set, they should build and validate the DAG,
+call `print_workflow_dag(workflow.validate())`, and return before constructing
+or submitting the orchestrator. DAG graph output should stay compact and print
+node ids, placement, workflow node class qualnames, and dependencies without
+module-qualified class names.
 The command may accept workflow paths only when they resolve to package-qualified
 modules under the Biomodals workflow package. Reject ad hoc workflow files that
 cannot be imported by a stable package module path.

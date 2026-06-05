@@ -16,6 +16,7 @@ from biomodals.schema import (
     ArtifactKind,
     VolumePath,
 )
+from biomodals.workflow import ppiflow_workflow
 from biomodals.workflow.core import NodeRunContext
 from biomodals.workflow.ppiflow_workflow import (
     CONF,
@@ -152,6 +153,58 @@ PPIFlowStep:
     assert submission.function_call.object_id == "fc-ppiflow"
     assert fake_function.kwargs["run_name"] == "demo-run"
     assert isinstance(fake_function.kwargs["args"], ppiflow_app.PPIFlowArgs)
+
+
+def test_submit_ppiflow_workflow_dry_run_prints_dag_without_orchestrator(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    task_yaml = tmp_path / "task.yaml"
+    steps_yaml = tmp_path / "steps.yaml"
+    input_pdb = tmp_path / "demo.pdb"
+    input_pdb.write_text("ATOM\n", encoding="utf-8")
+    task_yaml.write_bytes(_task_yaml(enabled_steps="  PPIFlowStep: true\n"))
+    steps_yaml.write_text(
+        f"""
+PPIFlowStep:
+  run_name: demo-run
+  args:
+    name: demo
+    specified_hotspots: A1
+    input_pdb: {input_pdb}
+    binder_chain: B
+""",
+        encoding="utf-8",
+    )
+
+    class UnexpectedWorkflowOrchestrator:
+        def __init__(self) -> None:
+            raise AssertionError("dry-run should not construct the orchestrator")
+
+    monkeypatch.setattr(
+        ppiflow_workflow.orchestrator,
+        "WorkflowOrchestrator",
+        UnexpectedWorkflowOrchestrator,
+    )
+
+    raw_f = ppiflow_workflow.submit_ppiflow_workflow.info.raw_f
+    assert raw_f is not None
+    raw_f(
+        task_yaml=str(task_yaml),
+        steps_yaml=str(steps_yaml),
+        run_id="demo",
+        dry_run=True,
+    )
+
+    stdout = capsys.readouterr().out
+    assert "[workflow] DAG graph: node_id [placement; class] <- dependency" in stdout
+    assert (
+        "[workflow]   stage1-ppiflow-design [remote; PPIFlowWorkflowNode] <- -"
+        in stdout
+    )
+    assert "ppiflow_workflow.PPIFlowWorkflowNode" not in stdout
+    assert "Submitting PPIFlow workflow" not in stdout
 
 
 def test_ppiflow_unsupported_steps_fail_with_clear_adapter_error(

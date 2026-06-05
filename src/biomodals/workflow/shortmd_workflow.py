@@ -43,6 +43,7 @@ from biomodals.workflow.core import (
     Workflow,
     WorkflowNativeNode,
     orchestrator,
+    print_workflow_dag,
 )
 
 DEPENDENCY_APPS = ("gromacs",)
@@ -648,6 +649,7 @@ def submit_shortmd_workflow(
     force: bool = False,
     wait: bool = True,
     max_parallel: int = 16,
+    dry_run: bool = False,
 ) -> None:
     """Run ShortMD production replicate workflow for a directory of PDB files.
 
@@ -671,6 +673,7 @@ def submit_shortmd_workflow(
             Modal function call id for asynchronous collection.
         max_parallel: Maximum number of ready workflow nodes to execute
             concurrently in one scheduler wave.
+        dry_run: Print the workflow DAG graph and skip orchestrator execution.
     """
     input_path = Path(input_dir).expanduser().resolve()
     input_pdbs = discover_pdb_inputs(input_path)
@@ -690,6 +693,9 @@ def submit_shortmd_workflow(
         max_parallel=max_parallel,
         overwrite_existing=force,
     )
+    if dry_run:
+        print_workflow_dag(workflow.validate())
+        return
 
     orchestrator_handle = orchestrator.WorkflowOrchestrator()
     orchestrator_kwargs = {

@@ -422,9 +422,10 @@ def test_runtime_logs_dag_and_node_state_transitions(
     assert result.status == AppRunStatus.SUCCEEDED
     stdout = capsys.readouterr().out
     assert "[workflow] Starting workflow 'demo' run 'run-1'" in stdout
-    assert "[workflow] DAG graph:" in stdout
-    assert "[workflow]   prepare" in stdout
-    assert "[workflow]   produce" in stdout
+    assert "[workflow] DAG graph: node_id [placement; class] <- dependency" in stdout
+    assert "[workflow]   prepare [orchestrator; FakeNode] <- -" in stdout
+    assert "[workflow]   produce [orchestrator; FakeNode] <- prepare" in stdout
+    assert "tests.workflow.test_runtime.FakeNode" not in stdout
     assert "<- prepare" in stdout
     assert "[workflow] Node started: prepare attempt=attempt-1" in stdout
     assert "[workflow] Node succeeded: prepare attempt=attempt-1" in stdout

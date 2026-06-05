@@ -31,6 +31,7 @@ from biomodals.workflow.core import (
     Workflow,
     WorkflowNativeNode,
     orchestrator,
+    print_workflow_dag,
 )
 
 PPI_FLOW_OUTPUT_LAYOUT = (
@@ -501,6 +502,7 @@ def submit_ppiflow_workflow(
     force: bool = False,
     wait: bool = True,
     max_parallel: int = 16,
+    dry_run: bool = False,
 ) -> None:
     """Build and submit a PPIFlow workflow from task and step YAML files.
 
@@ -517,14 +519,25 @@ def submit_ppiflow_workflow(
             Modal function call id for asynchronous collection.
         max_parallel: Maximum number of ready workflow nodes to execute
             concurrently in one scheduler wave.
+        dry_run: Print the workflow DAG graph and skip orchestrator execution.
     """
     task_yaml_path = Path(task_yaml).expanduser().resolve()
     steps_yaml_path = Path(steps_yaml).expanduser().resolve()
     resolved_run_id = sanitize_filename(run_id or task_yaml_path.stem)
     task_yaml_bytes = task_yaml_path.read_bytes()
+    steps_yaml_bytes = steps_yaml_path.read_bytes()
     task_doc = _load_yaml_bytes(task_yaml_bytes)
+    if dry_run:
+        workflow = build_ppiflow_workflow(
+            task_yaml_bytes=task_yaml_bytes,
+            steps_yaml_bytes=steps_yaml_bytes,
+            stage=stage,
+        )
+        print_workflow_dag(workflow.validate())
+        return
+
     steps_doc = _stage_ppiflow_app_inputs(
-        steps_doc=_load_yaml_bytes(steps_yaml_path.read_bytes()),
+        steps_doc=_load_yaml_bytes(steps_yaml_bytes),
         run_id=resolved_run_id,
         app_steps=_active_ppiflow_app_steps(task_doc, stage),
     )

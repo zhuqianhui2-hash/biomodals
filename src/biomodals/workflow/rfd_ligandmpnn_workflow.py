@@ -40,6 +40,7 @@ from biomodals.workflow.core import (
     Workflow,
     WorkflowNativeNode,
     orchestrator,
+    print_workflow_dag,
 )
 
 DEPENDENCY_APPS = ("rfdiffusion", "ligandmpnn")
@@ -514,6 +515,7 @@ def submit_rfd_ligandmpnn_workflow(
     force: bool = False,
     wait: bool = True,
     max_parallel: int = 16,
+    dry_run: bool = False,
 ) -> None:
     """Run RFdiffusion trajectories followed by LigandMPNN sequence design.
 
@@ -536,6 +538,7 @@ def submit_rfd_ligandmpnn_workflow(
         force: Replace an existing workflow run ledger before running.
         wait: Wait locally for the remote workflow result.
         max_parallel: Maximum ready workflow nodes per scheduler wave.
+        dry_run: Print the workflow DAG graph and skip orchestrator execution.
     """
     input_path = Path(input_pdb).expanduser().resolve()
     if not input_path.exists():
@@ -559,6 +562,9 @@ def submit_rfd_ligandmpnn_workflow(
         rfd_args=rfd_args,
         max_parallel=max_parallel,
     )
+    if dry_run:
+        print_workflow_dag(workflow.validate())
+        return
     total_structures = num_rfdiffusion_trajectories * num_rfdiffusion_designs
     print(
         f"Submitting {CONF.name} '{resolved_run_id}' with "

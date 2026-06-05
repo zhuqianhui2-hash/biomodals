@@ -667,3 +667,47 @@ def test_submit_rfd_ligandmpnn_workflow_uses_orchestrator_boundary(
     stdout = capsys.readouterr().out
     assert "Submitting RFDLigandMPNNWorkflow 'demo'" in stdout
     assert "1 RFdiffusion trajector" in stdout
+
+
+def test_submit_rfd_ligandmpnn_workflow_dry_run_prints_dag_without_orchestrator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    input_pdb = tmp_path / "input.pdb"
+    input_pdb.write_text("ATOM\n", encoding="utf-8")
+
+    class UnexpectedWorkflowOrchestrator:
+        def __init__(self) -> None:
+            pytest.fail("dry-run should not construct the orchestrator")
+
+    monkeypatch.setattr(
+        rfd_ligandmpnn_workflow.orchestrator,
+        "WorkflowOrchestrator",
+        UnexpectedWorkflowOrchestrator,
+    )
+
+    raw_f = rfd_ligandmpnn_workflow.submit_rfd_ligandmpnn_workflow.info.raw_f
+    assert raw_f is not None
+    raw_f(
+        input_pdb=str(input_pdb),
+        contigs="100-150/0 E333-526",
+        hotspot_res="E405,E408",
+        run_id="demo",
+        num_rfdiffusion_trajectories=1,
+        num_rfdiffusion_designs=2,
+        dry_run=True,
+    )
+
+    stdout = capsys.readouterr().out
+    assert "[workflow] DAG graph: node_id [placement; class] <- dependency" in stdout
+    assert (
+        "[workflow]   rfd-demo-rfd001 [remote; RFdiffusionTrajectoryNode] <- -"
+        in stdout
+    )
+    assert (
+        "[workflow]   ligandmpnn-demo-rfd001-d000 "
+        "[remote; LigandMPNNDesignNode] <- rfd-demo-rfd001" in stdout
+    )
+    assert "rfd_ligandmpnn_workflow.RFdiffusionTrajectoryNode" not in stdout
+    assert "Submitting RFDLigandMPNNWorkflow" not in stdout

@@ -29,6 +29,10 @@ skill:
   execution wrapper. `process_remote_result(...)` is part of the node contract
   and `AppBackedNode` / `REMOTE` `WorkflowNativeNode` classes provide the
   default submit-wait-process `run()` behavior.
+- User-facing workflow local entrypoints should accept `dry_run: bool = False`.
+  When set, build the workflow, call `print_workflow_dag(workflow.validate())`,
+  and return before constructing or submitting the orchestrator. The CLI
+  forwards `biomodals workflow run --dry-run` to this entrypoint flag.
 - When declaring dependency apps, mirror `AppConfig.depends_on_apps` into a
   Modal-valid `CONF.tags["depends_on"]` value such as
   `"-".join(DEPENDENCY_APPS)`, then call `include_dependency_apps(...)`.
