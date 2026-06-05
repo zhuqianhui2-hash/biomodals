@@ -105,12 +105,13 @@ def run_command_with_log(
     """Run a shell command and log output to a file."""
     import shlex
     import subprocess as sp
+    import sys
     from datetime import datetime, timedelta
     from time import time
 
-    try:
+    if sys.version_info >= (3, 11):  # noqa: UP036
         from datetime import UTC
-    except ImportError:
+    else:
         from datetime import timezone
 
         UTC = timezone.utc  # noqa: UP017

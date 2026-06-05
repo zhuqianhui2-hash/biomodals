@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import sys
 from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
 from datetime import datetime
@@ -28,9 +29,9 @@ from biomodals.schema import (
     WorkflowRun,
 )
 
-try:
+if sys.version_info >= (3, 11):  # noqa: UP036
     from datetime import UTC
-except ImportError:
+else:
     from datetime import timezone
 
     UTC = timezone.utc  # noqa: UP017
