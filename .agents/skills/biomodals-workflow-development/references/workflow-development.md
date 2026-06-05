@@ -146,11 +146,27 @@ filtering, ranking, reporting, and small manifest transforms.
 Use `REMOTE` placement for long-running work, app-backed work, and work that
 benefits from failure isolation.
 
-The runtime routes `REMOTE` nodes through an injected remote-node runner when
-one is available. The Modal orchestrator supplies a thin remote runner that
-executes one node in a separate Modal function and commits workflow volume
-writes after node code returns. Unit tests use fake runners and must not call
-live Modal APIs.
+Every `REMOTE` node must implement direct remote submission:
+`submit_remote(context)` returns a `RemoteNodeSubmission` containing the actual
+Modal `FunctionCall`, a readable function name, and any small JSON metadata
+needed to post-process or recover the result. If the remote result is not
+already an `AppRunResult`, or if workflow metadata must be attached before
+artifact materialization, implement `process_remote_result(result, metadata)`.
+`process_remote_result(...)` is part of the node contract and defaults to
+`AppRunResult.model_validate(result)`. `AppBackedNode` and `REMOTE`
+`WorkflowNativeNode` implementations inherit a default `run()` that submits the
+remote call, waits for `.get()`, and calls `process_remote_result(...)`.
+`ORCHESTRATOR` `WorkflowNativeNode` implementations must still implement
+`run(context)` directly. The runtime records the direct call ID in the ledger
+before waiting for the result and reuses the recorded processed `AppRunResult`
+during recovery.
+
+Do not add a generic remote-node wrapper that accepts arbitrary workflow nodes.
+Workflow-native file-management adapters and app-backed nodes that combine
+multiple non-`AppRunResult` app calls should expose their own workflow-local
+Modal functions or submit the primary app call directly and adapt the raw result
+with `process_remote_result(...)`. Unit tests use fake `FunctionCall` objects
+and must not call live Modal APIs.
 
 ## Ledger Layout
 
@@ -258,9 +274,10 @@ must not perform deployed app lookups, import workflow app functions by name, or
 handle hydration details for workflow-specific apps. Domain-specific input
 staging and DAG construction belong in top-level workflow scripts.
 
-Keep the public orchestrator method surface minimal. The intended remote methods
-are `WorkflowOrchestrator.run(...)` for a whole workflow run and
-`WorkflowOrchestrator.run_node(...)` for isolated remote node execution. Do not
+Keep the public orchestrator method surface minimal. The intended remote method
+for user-facing submission is `WorkflowOrchestrator.run(...)`. The orchestrator
+does not expose a generic per-node execution method; runtime-managed `REMOTE`
+nodes submit the real Modal function via `RemoteNodeSubmission` instead. Do not
 add convenience wrappers or alternate submission APIs unless they cover a large
 missing capability or a clear ergonomics gap.
 

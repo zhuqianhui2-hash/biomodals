@@ -24,6 +24,11 @@ skill:
 - Keep shared schemas pure Pydantic. For inline bytes, use Pydantic
   `ser_json_bytes` / `val_json_bytes` config for JSON byte handling and enforce
   text-vs-zstd archive policy in workflow runtime materialization code.
+- Every runtime-managed `REMOTE` node must submit its own direct
+  `RemoteNodeSubmission`; the orchestrator does not provide a generic per-node
+  execution wrapper. `process_remote_result(...)` is part of the node contract
+  and `AppBackedNode` / `REMOTE` `WorkflowNativeNode` classes provide the
+  default submit-wait-process `run()` behavior.
 - When declaring dependency apps, mirror `AppConfig.depends_on_apps` into a
   Modal-valid `CONF.tags["depends_on"]` value such as
   `"-".join(DEPENDENCY_APPS)`, then call `include_dependency_apps(...)`.

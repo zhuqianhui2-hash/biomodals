@@ -36,6 +36,13 @@ because it is expected to be refactored.
 - Prefer `AppBackedNode` for nodes that primarily call app functions.
   Add `WorkflowNativeNode` only for adapters, summaries, selectors, and
   workflow-specific file-management glue.
+- Every `REMOTE` node must define a node-level `submit_remote(context)` hook
+  that returns `RemoteNodeSubmission` for the actual Modal `FunctionCall`.
+  `process_remote_result(result, metadata)` is part of the node contract and
+  defaults to `AppRunResult.model_validate(result)`. Override it when the raw
+  remote result must be adapted before artifact materialization. `AppBackedNode`
+  and `REMOTE` `WorkflowNativeNode` implementations inherit a default `run()`
+  that submits the remote call, waits for `.get()`, and processes the result.
 - Store hydrated Modal functions/classes in a small `*ModalNamespace` dataclass
   typed as `modal.Function` or `modal.Cls`, and exclude that namespace from DAG
   hashing with `repr=False`, `compare=False`, and `metadata={"dag_hash": False}`.

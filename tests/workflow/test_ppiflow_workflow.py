@@ -26,12 +26,21 @@ from biomodals.workflow.ppiflow_workflow import (
 )
 
 
+class _FakeFunctionCall:
+    def __init__(self, object_id: str, result: AppRunResult | None = None) -> None:
+        self.object_id = object_id
+        self.result = result or AppRunResult(status=AppRunStatus.SUCCEEDED)
+
+    def get(self, timeout=None):
+        _ = timeout
+        return self.result
+
+
 class _FakePPIFlowFunction:
     def __init__(self) -> None:
         self.kwargs = {}
 
-    def remote(self, **kwargs):
-        self.kwargs = kwargs
+    def _result(self) -> AppRunResult:
         return AppRunResult(
             status=AppRunStatus.SUCCEEDED,
             outputs=[
@@ -45,6 +54,14 @@ class _FakePPIFlowFunction:
                 )
             ],
         )
+
+    def remote(self, **kwargs):
+        self.kwargs = kwargs
+        return self._result()
+
+    def spawn(self, **kwargs):
+        self.kwargs = kwargs
+        return _FakeFunctionCall("fc-ppiflow", self._result())
 
 
 def _task_yaml(*, enabled_steps: str) -> bytes:
@@ -99,6 +116,42 @@ PPIFlowStep:
         volume_name=ppiflow_app.CONF.output_volume_name,
         path="demo-run",
     )
+
+
+def test_ppiflow_app_step_submits_app_function_directly(tmp_path: Path) -> None:
+    fake_function = _FakePPIFlowFunction()
+    namespace = PPIFlowModalNamespace(
+        ppiflow_run=cast(modal.Function, fake_function),
+    )
+    workflow = build_ppiflow_workflow(
+        task_yaml_bytes=_task_yaml(enabled_steps="  PPIFlowStep: true\n"),
+        steps_yaml_bytes=b"""
+PPIFlowStep:
+  run_name: demo-run
+  args:
+    name: demo
+    specified_hotspots: A1
+    input_pdb: /inputs/demo.pdb
+    binder_chain: B
+""",
+        modal_namespace=namespace,
+    )
+
+    spec = workflow.validate().nodes["stage1-ppiflow-design"]
+    submission = spec.node.submit_remote(
+        NodeRunContext(
+            run_id="run-1",
+            node_id=spec.node_id,
+            attempt_id="attempt-1",
+            cache_dir=tmp_path,
+            inputs={},
+        )
+    )
+
+    assert submission.function_name == "ppiflow_run"
+    assert submission.function_call.object_id == "fc-ppiflow"
+    assert fake_function.kwargs["run_name"] == "demo-run"
+    assert isinstance(fake_function.kwargs["args"], ppiflow_app.PPIFlowArgs)
 
 
 def test_ppiflow_unsupported_steps_fail_with_clear_adapter_error(

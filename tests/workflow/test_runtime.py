@@ -2,11 +2,14 @@
 
 # ruff: noqa: D101,D102,D103,D107
 
+from __future__ import annotations
+
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Barrier, BrokenBarrierError, Event, Thread
 
+import orjson
 import pytest
 from pydantic import BaseModel, Field
 
@@ -26,7 +29,7 @@ from biomodals.schema import (
 )
 from biomodals.workflow import Workflow
 from biomodals.workflow.core.ledger import WorkflowLedger
-from biomodals.workflow.core.nodes import WorkflowNativeNode
+from biomodals.workflow.core.nodes import RemoteNodeSubmission, WorkflowNativeNode
 from biomodals.workflow.core.runtime import WorkflowRuntime
 
 
@@ -72,7 +75,7 @@ class RuntimeErrorNode(WorkflowNativeNode):
 
 
 class CommitObservedNode(WorkflowNativeNode):
-    def __init__(self, volume: "FakeVolume"):
+    def __init__(self, volume: FakeVolume):
         self.volume = volume
         self.commit_count_at_run = -1
 
@@ -85,7 +88,33 @@ class RemoteOnlyNode(WorkflowNativeNode):
     placement = NodePlacement.REMOTE
 
     def run(self, context):
-        raise AssertionError("remote placement should use remote_node_runner")
+        raise AssertionError("remote placement should use submit_remote")
+
+
+class DirectSubmitNode(WorkflowNativeNode):
+    placement = NodePlacement.REMOTE
+
+    def __init__(self, *, call: FakeRemoteCall):
+        self.call = call
+        self.submitted_contexts: list[str] = []
+        self.processed_metadata: list[dict[str, object]] = []
+
+    def submit_remote(self, context):
+        self.submitted_contexts.append(context.node_id)
+        return RemoteNodeSubmission(
+            function_call=self.call,
+            function_name="direct_app_function",
+            metadata={"selected": "A1 A3"},
+        )
+
+    def process_remote_result(self, result, metadata):
+        self.processed_metadata.append(dict(metadata))
+        for output in result.outputs:
+            output.metadata.setdefault("selected", str(metadata["selected"]))
+        return result
+
+    def run(self, context):
+        raise AssertionError("direct remote placement should submit a FunctionCall")
 
 
 class FakeRemoteCall:
@@ -574,32 +603,81 @@ def test_runtime_commits_node_start_before_node_execution(tmp_path: Path) -> Non
     assert node.commit_count_at_run >= 3
 
 
-def test_remote_placement_uses_injected_remote_runner(tmp_path: Path) -> None:
+def test_remote_placement_requires_direct_submission(tmp_path: Path) -> None:
     workflow = Workflow("demo")
     workflow.add_node(RemoteOnlyNode(), id="remote")
-    calls = []
-
-    def remote_runner(node, context):
-        calls.append((node, context.node_id))
-        return AppRunResult(status=AppRunStatus.SUCCEEDED)
 
     runtime = WorkflowRuntime(
         workflow=workflow,
         volume_root=tmp_path,
         workflow_volume_name="Workflow-outputs",
-        remote_node_runner=remote_runner,
+    )
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.FAILED
+    assert result.warnings
+    assert "must implement submit_remote" in result.warnings[0]
+
+
+def test_remote_placement_prefers_direct_node_submission(
+    tmp_path: Path,
+) -> None:
+    workflow = Workflow("demo")
+    node = DirectSubmitNode(
+        call=FakeRemoteCall(
+            object_id="fc-direct",
+            result=AppRunResult(
+                status=AppRunStatus.SUCCEEDED,
+                outputs=[
+                    AppOutput(
+                        name="output",
+                        kind=ArtifactKind.REPORT,
+                        storage=InlineBytes(data=b"ok", filename="output.txt"),
+                    )
+                ],
+            ),
+        )
+    )
+    workflow.add_node(node, id="remote")
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
     )
     result = runtime.run(run_id="run-1")
 
     assert result.status == AppRunStatus.SUCCEEDED
-    assert calls == [(workflow.validate().nodes["remote"].node, "remote")]
+    assert node.submitted_contexts == ["remote"]
+    assert node.call.get_timeouts == [0]
+    assert node.processed_metadata == [{"selected": "A1 A3"}]
+    with sqlite3.connect(tmp_path / "demo" / "run-1" / "ledger.sqlite3") as conn:
+        remote_call = conn.execute(
+            """
+            SELECT function_name, metadata_json
+            FROM remote_calls
+            WHERE call_id = 'fc-direct'
+            """
+        ).fetchone()
+        artifact_metadata = conn.execute(
+            """
+            SELECT metadata_json
+            FROM artifacts
+            WHERE artifact_id = 'remote-output'
+            """
+        ).fetchone()[0]
+    assert remote_call[0] == "direct_app_function"
+    assert orjson.loads(remote_call[1]) == {
+        "result_status": "succeeded",
+        "selected": "A1 A3",
+    }
+    assert orjson.loads(artifact_metadata) == {"selected": "A1 A3"}
 
 
 def test_remote_placement_records_function_call_before_waiting(
     tmp_path: Path,
 ) -> None:
     workflow = Workflow("demo")
-    workflow.add_node(RemoteOnlyNode(), id="remote")
     observed_statuses: list[str] = []
 
     def observe_remote_call(timeout):
@@ -609,18 +687,21 @@ def test_remote_placement_records_function_call_before_waiting(
             ).fetchone()
         observed_statuses.append(row[0])
 
-    def remote_runner(node, context):
-        return FakeRemoteCall(
-            object_id="fc-new",
-            result=AppRunResult(status=AppRunStatus.SUCCEEDED),
-            on_get=observe_remote_call,
-        )
+    workflow.add_node(
+        DirectSubmitNode(
+            call=FakeRemoteCall(
+                object_id="fc-new",
+                result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+                on_get=observe_remote_call,
+            )
+        ),
+        id="remote",
+    )
 
     runtime = WorkflowRuntime(
         workflow=workflow,
         volume_root=tmp_path,
         workflow_volume_name="Workflow-outputs",
-        remote_node_runner=remote_runner,
     )
     result = runtime.run(run_id="run-1")
 
@@ -637,20 +718,20 @@ def test_remote_placement_records_configured_function_name(
     tmp_path: Path,
 ) -> None:
     workflow = Workflow("demo")
-    workflow.add_node(RemoteOnlyNode(), id="remote")
-
-    def remote_runner(node, context):
-        return FakeRemoteCall(
-            object_id="fc-named",
-            result=AppRunResult(status=AppRunStatus.SUCCEEDED),
-        )
+    workflow.add_node(
+        DirectSubmitNode(
+            call=FakeRemoteCall(
+                object_id="fc-named",
+                result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+            )
+        ),
+        id="remote",
+    )
 
     runtime = WorkflowRuntime(
         workflow=workflow,
         volume_root=tmp_path,
         workflow_volume_name="Workflow-outputs",
-        remote_node_runner=remote_runner,
-        remote_node_function_name="run_node",
     )
     result = runtime.run(run_id="run-1")
 
@@ -659,25 +740,26 @@ def test_remote_placement_records_configured_function_name(
         function_name = conn.execute(
             "SELECT function_name FROM remote_calls WHERE call_id = 'fc-named'"
         ).fetchone()[0]
-    assert function_name == "run_node"
+    assert function_name == "direct_app_function"
 
 
 def test_remote_call_failure_after_timeout_is_recorded(tmp_path: Path) -> None:
     workflow = Workflow("demo")
-    workflow.add_node(RemoteOnlyNode(), id="remote")
-
-    def remote_runner(node, context):
-        return FakeRemoteCall(
-            object_id="fc-fail",
-            result=AppRunResult(status=AppRunStatus.SUCCEEDED),
-            effects=[TimeoutError(), RuntimeError("remote exploded")],
-        )
+    workflow.add_node(
+        DirectSubmitNode(
+            call=FakeRemoteCall(
+                object_id="fc-fail",
+                result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+                effects=[TimeoutError(), RuntimeError("remote exploded")],
+            )
+        ),
+        id="remote",
+    )
 
     runtime = WorkflowRuntime(
         workflow=workflow,
         volume_root=tmp_path,
         workflow_volume_name="Workflow-outputs",
-        remote_node_runner=remote_runner,
     )
 
     result = runtime.run(run_id="run-1")
@@ -694,7 +776,6 @@ def test_runtime_cleanup_cancels_in_flight_remote_function_call(
     tmp_path: Path,
 ) -> None:
     workflow = Workflow("demo")
-    workflow.add_node(RemoteOnlyNode(), id="remote")
     waiting_for_result = Event()
     release_result = Event()
 
@@ -715,15 +796,12 @@ def test_runtime_cleanup_cancels_in_flight_remote_function_call(
         object_id="fc-blocking",
         result=AppRunResult(status=AppRunStatus.SUCCEEDED),
     )
-
-    def remote_runner(node, context):
-        return remote_call
+    workflow.add_node(DirectSubmitNode(call=remote_call), id="remote")
 
     runtime = WorkflowRuntime(
         workflow=workflow,
         volume_root=tmp_path,
         workflow_volume_name="Workflow-outputs",
-        remote_node_runner=remote_runner,
     )
     results: list[AppRunResult] = []
     thread = Thread(
@@ -748,19 +826,20 @@ def test_remote_success_records_app_result_before_succeeded_status(
     tmp_path: Path,
 ) -> None:
     workflow = Workflow("demo")
-    workflow.add_node(RemoteOnlyNode(), id="remote")
-
-    def remote_runner(node, context):
-        return FakeRemoteCall(
-            object_id="fc-success",
-            result=AppRunResult(status=AppRunStatus.SUCCEEDED),
-        )
+    workflow.add_node(
+        DirectSubmitNode(
+            call=FakeRemoteCall(
+                object_id="fc-success",
+                result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+            )
+        ),
+        id="remote",
+    )
 
     runtime = WorkflowRuntime(
         workflow=workflow,
         volume_root=tmp_path,
         workflow_volume_name="Workflow-outputs",
-        remote_node_runner=remote_runner,
     )
     result = runtime.run(run_id="run-1")
 
@@ -780,21 +859,22 @@ def test_remote_success_reloads_volume_before_materializing_outputs(
     tmp_path: Path,
 ) -> None:
     workflow = Workflow("demo")
-    workflow.add_node(RemoteOnlyNode(), id="remote")
     volume = FakeVolume()
-
-    def remote_runner(node, context):
-        return FakeRemoteCall(
-            object_id="fc-reload",
-            result=AppRunResult(status=AppRunStatus.SUCCEEDED),
-        )
+    workflow.add_node(
+        DirectSubmitNode(
+            call=FakeRemoteCall(
+                object_id="fc-reload",
+                result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+            )
+        ),
+        id="remote",
+    )
 
     runtime = WorkflowRuntime(
         workflow=workflow,
         volume_root=tmp_path,
         workflow_volume_name="Workflow-outputs",
         workflow_volume=volume,
-        remote_node_runner=remote_runner,
     )
     result = runtime.run(run_id="run-1")
 
@@ -806,7 +886,13 @@ def test_remote_recovery_reattaches_existing_call_before_rerun(
     tmp_path: Path,
 ) -> None:
     workflow = Workflow("demo")
-    workflow.add_node(RemoteOnlyNode(), id="remote")
+    node = DirectSubmitNode(
+        call=FakeRemoteCall(
+            object_id="fc-unused",
+            result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+        )
+    )
+    workflow.add_node(node, id="remote")
     ledger = WorkflowLedger(tmp_path)
     ledger.create_run(WorkflowRun(workflow_name="demo", run_id="run-1"))
     ledger.mark_node_running(
@@ -819,11 +905,10 @@ def test_remote_recovery_reattaches_existing_call_before_rerun(
         call_id="fc-old",
         node_id="remote",
         attempt_id="attempt-old",
-        function_name="run_node",
+        function_name="direct_app_function",
         call_kind="node",
     )
     resolved: list[str] = []
-    remote_runner_calls: list[str] = []
     existing_call = FakeRemoteCall(
         object_id="fc-old",
         result=AppRunResult(status=AppRunStatus.SUCCEEDED),
@@ -833,25 +918,85 @@ def test_remote_recovery_reattaches_existing_call_before_rerun(
         resolved.append(call_id)
         return existing_call
 
-    def remote_runner(node, context):
-        remote_runner_calls.append(context.node_id)
-        raise AssertionError("existing remote call should be reattached")
-
     runtime = WorkflowRuntime(
         workflow=workflow,
         volume_root=tmp_path,
         workflow_volume_name="Workflow-outputs",
-        remote_node_runner=remote_runner,
         function_call_resolver=resolve_call,
     )
     result = runtime.run(run_id="run-1")
 
     assert result.status == AppRunStatus.SUCCEEDED
     assert resolved == ["fc-old"]
-    assert remote_runner_calls == []
+    assert node.submitted_contexts == []
     assert existing_call.get_timeouts == [0]
     status = runtime.ledger._load_node_status_or_default("remote")
     assert status.status == NodeStatus.SUCCEEDED
+
+
+def test_remote_recovery_processes_direct_submission_metadata(
+    tmp_path: Path,
+) -> None:
+    workflow = Workflow("demo")
+    node = DirectSubmitNode(
+        call=FakeRemoteCall(
+            object_id="fc-unused",
+            result=AppRunResult(status=AppRunStatus.SUCCEEDED),
+        )
+    )
+    workflow.add_node(node, id="remote")
+    ledger = WorkflowLedger(tmp_path)
+    ledger.create_run(WorkflowRun(workflow_name="demo", run_id="run-1"))
+    ledger.mark_node_running(
+        "remote",
+        "attempt-old",
+        placement=NodePlacement.REMOTE,
+    )
+    ledger.record_attempt_started("remote", "attempt-old")
+    ledger.record_app_result(
+        "remote",
+        "attempt-old",
+        AppRunResult(
+            status=AppRunStatus.SUCCEEDED,
+            outputs=[
+                AppOutput(
+                    name="output",
+                    kind=ArtifactKind.REPORT,
+                    storage=InlineBytes(data=b"ok", filename="output.txt"),
+                    metadata={"selected": "B5"},
+                )
+            ],
+        ),
+    )
+    ledger.record_remote_call(
+        call_id="fc-old-direct",
+        node_id="remote",
+        attempt_id="attempt-old",
+        function_name="direct_app_function",
+        call_kind="node",
+        status="succeeded",
+        metadata={"selected": "B5"},
+    )
+
+    runtime = WorkflowRuntime(
+        workflow=workflow,
+        volume_root=tmp_path,
+        workflow_volume_name="Workflow-outputs",
+    )
+    result = runtime.run(run_id="run-1")
+
+    assert result.status == AppRunStatus.SUCCEEDED
+    assert node.submitted_contexts == []
+    assert node.processed_metadata == []
+    with sqlite3.connect(tmp_path / "demo" / "run-1" / "ledger.sqlite3") as conn:
+        artifact_metadata = conn.execute(
+            """
+            SELECT metadata_json
+            FROM artifacts
+            WHERE artifact_id = 'remote-output'
+            """
+        ).fetchone()[0]
+    assert orjson.loads(artifact_metadata) == {"selected": "B5"}
 
 
 def test_runtime_passes_selected_upstream_artifacts_to_node_context(

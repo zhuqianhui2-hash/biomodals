@@ -29,8 +29,8 @@ from biomodals.workflow.rfd_ligandmpnn_workflow import (
     LigandMPNNDesignNode,
     LigandMPNNDesignSettings,
     RFdiffusionTrajectoryNode,
-    RFDLigandMPNNModalNamespace,
     RFDLigandMPNNSummaryNode,
+    WorkflowModalNamespace,
     build_rfd_ligandmpnn_workflow,
     select_rfdiffusion_design,
 )
@@ -42,6 +42,24 @@ class UnexpectedRemoteFunction:
     def remote(self, *args: object, **kwargs: object) -> object:
         """Fail if the sentinel is invoked."""
         pytest.fail(f"Unexpected remote call: args={args}, kwargs={kwargs}")
+
+    def spawn(self, *args: object, **kwargs: object) -> object:
+        """Fail if the sentinel is spawned."""
+        pytest.fail(f"Unexpected spawn call: args={args}, kwargs={kwargs}")
+
+
+class FakeFunctionCall:
+    """Small FunctionCall stand-in for direct submission tests."""
+
+    def __init__(self, object_id: str, result: AppRunResult | None = None) -> None:
+        """Initialize the fake call with a stable Modal object id and result."""
+        self.object_id = object_id
+        self.result = result or AppRunResult(status=AppRunStatus.SUCCEEDED)
+
+    def get(self, timeout: float | int | None = None) -> AppRunResult:
+        """Return a successful fake app result."""
+        _ = timeout
+        return self.result
 
 
 UNEXPECTED_REMOTE = cast(modal.Function, UnexpectedRemoteFunction())
@@ -132,7 +150,7 @@ def test_build_rfd_ligandmpnn_workflow_models_trajectory_design_fanout() -> None
     assert rfd_node.contigs == "100-150/0 E333-526"
     assert rfd_node.hotspot_res == "E405,E408"
     assert rfd_node.num_designs == 2
-    assert isinstance(rfd_node.modal_namespace, RFDLigandMPNNModalNamespace)
+    assert isinstance(rfd_node.modal_namespace, WorkflowModalNamespace)
 
     assert isinstance(mpnn_node, LigandMPNNDesignNode)
     assert mpnn_node.placement == NodePlacement.REMOTE
@@ -159,21 +177,24 @@ def test_rfdiffusion_node_calls_app_function_with_hydra_overrides(
     calls: dict[str, Any] = {}
 
     class FakeRFdiffusionFunction:
-        def remote(self, **kwargs: object) -> AppRunResult:
+        def spawn(self, **kwargs: object) -> FakeFunctionCall:
             calls.update(kwargs)
-            return AppRunResult(
-                status=AppRunStatus.SUCCEEDED,
-                outputs=[
-                    AppOutput(
-                        name="RFdiffusion_outputs",
-                        kind=ArtifactKind.DIRECTORY,
-                        storage=VolumePath(
-                            volume_name=rfdiffusion_app.CONF.output_volume_name,
-                            path="demo-rfd001/rfd-scaffolds",
-                        ),
-                        metadata={"run_name": "demo-rfd001"},
-                    )
-                ],
+            return FakeFunctionCall(
+                "fc-rfd-run",
+                AppRunResult(
+                    status=AppRunStatus.SUCCEEDED,
+                    outputs=[
+                        AppOutput(
+                            name="RFdiffusion_outputs",
+                            kind=ArtifactKind.DIRECTORY,
+                            storage=VolumePath(
+                                volume_name=rfdiffusion_app.CONF.output_volume_name,
+                                path="demo-rfd001/rfd-scaffolds",
+                            ),
+                            metadata={"run_name": "demo-rfd001"},
+                        )
+                    ],
+                ),
             )
 
     node = RFdiffusionTrajectoryNode(
@@ -183,7 +204,7 @@ def test_rfdiffusion_node_calls_app_function_with_hydra_overrides(
         contigs="100-150/0 E333-526",
         hotspot_res="E405 E408",
         num_designs=2,
-        modal_namespace=RFDLigandMPNNModalNamespace(
+        modal_namespace=WorkflowModalNamespace(
             rfdiffusion_infer=cast(modal.Function, FakeRFdiffusionFunction()),
             ligandmpnn_run=UNEXPECTED_REMOTE,
             select_rfd_design=UNEXPECTED_REMOTE,
@@ -195,6 +216,45 @@ def test_rfdiffusion_node_calls_app_function_with_hydra_overrides(
     assert result.status == AppRunStatus.SUCCEEDED
     assert calls["input_pdb_bytes"] == b"ATOM\n"
     assert calls["input_pdb_name"] == "input.pdb"
+    assert calls["run_name"] == "demo-rfd001"
+    assert calls[
+        "hydra_overrides"
+    ] == rfdiffusion_app.build_rfdiffusion_hydra_overrides(
+        contigs="100-150/0 E333-526",
+        num_designs=2,
+        hotspot_res="E405 E408",
+    )
+
+
+def test_rfdiffusion_node_submits_app_function_directly(
+    tmp_path: Path,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    class FakeRFdiffusionFunction:
+        def spawn(self, **kwargs: object) -> FakeFunctionCall:
+            calls.update(kwargs)
+            return FakeFunctionCall("fc-rfd")
+
+    node = RFdiffusionTrajectoryNode(
+        pdb_content=b"ATOM\n",
+        input_pdb_name="input.pdb",
+        run_name="../demo-rfd001",
+        contigs="100-150/0 E333-526",
+        hotspot_res="E405 E408",
+        num_designs=2,
+        modal_namespace=WorkflowModalNamespace(
+            rfdiffusion_infer=cast(modal.Function, FakeRFdiffusionFunction()),
+            ligandmpnn_run=UNEXPECTED_REMOTE,
+            select_rfd_design=UNEXPECTED_REMOTE,
+        ),
+    )
+
+    submission = node.submit_remote(_context(tmp_path=tmp_path))
+
+    assert submission.function_name == "rfdiffusion_infer"
+    assert submission.function_call.object_id == "fc-rfd"
+    assert calls["input_pdb_bytes"] == b"ATOM\n"
     assert calls["run_name"] == "demo-rfd001"
     assert calls[
         "hydra_overrides"
@@ -315,7 +375,7 @@ def test_ligandmpnn_node_selects_rfd_output_and_calls_ligandmpnn(
             }
 
     class FakeLigandMPNNFunction:
-        def remote(self, **kwargs: object) -> AppRunResult:
+        def _record(self, **kwargs: object) -> AppRunResult:
             ligandmpnn_calls.update(kwargs)
             return AppRunResult(
                 status=AppRunStatus.SUCCEEDED,
@@ -332,11 +392,17 @@ def test_ligandmpnn_node_selects_rfd_output_and_calls_ligandmpnn(
                 ],
             )
 
+        def remote(self, **kwargs: object) -> AppRunResult:
+            return self._record(**kwargs)
+
+        def spawn(self, **kwargs: object) -> FakeFunctionCall:
+            return FakeFunctionCall("fc-ligandmpnn-run", self._record(**kwargs))
+
     node = LigandMPNNDesignNode(
         rfd_run_name="demo-rfd001",
         design_index=0,
         run_name="../demo-rfd001-d000-mpnn",
-        modal_namespace=RFDLigandMPNNModalNamespace(
+        modal_namespace=WorkflowModalNamespace(
             rfdiffusion_infer=UNEXPECTED_REMOTE,
             ligandmpnn_run=cast(modal.Function, FakeLigandMPNNFunction()),
             select_rfd_design=cast(modal.Function, FakeSelectorFunction()),
@@ -392,6 +458,118 @@ def test_ligandmpnn_node_selects_rfd_output_and_calls_ligandmpnn(
         redesigned_residues="A1 A2",
     )
     assert result.outputs[0].name == "LigandMPNN_outputs"
+
+
+def test_ligandmpnn_node_submits_app_function_directly_and_processes_metadata(
+    tmp_path: Path,
+) -> None:
+    select_calls: dict[str, Any] = {}
+    ligandmpnn_calls: dict[str, Any] = {}
+
+    class FakeSelectorFunction:
+        def remote(self, **kwargs: object) -> dict[str, object]:
+            select_calls.update(kwargs)
+            return {
+                "pdb_name": "demo-rfd001_0.pdb",
+                "pdb_bytes": b"ATOM\n",
+                "trb_name": "demo-rfd001_0.trb",
+                "redesigned_residues": "A1 A2",
+            }
+
+    class FakeLigandMPNNFunction:
+        def spawn(self, **kwargs: object) -> FakeFunctionCall:
+            ligandmpnn_calls.update(kwargs)
+            return FakeFunctionCall("fc-ligandmpnn")
+
+    node = LigandMPNNDesignNode(
+        rfd_run_name="demo-rfd001",
+        design_index=0,
+        run_name="../demo-rfd001-d000-mpnn",
+        modal_namespace=WorkflowModalNamespace(
+            rfdiffusion_infer=UNEXPECTED_REMOTE,
+            ligandmpnn_run=cast(modal.Function, FakeLigandMPNNFunction()),
+            select_rfd_design=cast(modal.Function, FakeSelectorFunction()),
+        ),
+        settings=LigandMPNNDesignSettings(
+            model_type="protein_mpnn",
+            seeds=(7, 11),
+            batch_size=4,
+            number_of_batches=3,
+            sc_num_samples=7,
+            number_of_packs_per_design=5,
+        ),
+    )
+    rfd_artifact = WorkflowArtifact(
+        artifact_id="rfd-output",
+        producing_node_id="rfd-demo-rfd001",
+        kind=ArtifactKind.DIRECTORY,
+        storage=VolumePath(
+            volume_name=rfdiffusion_app.CONF.output_volume_name,
+            path="demo-rfd001/rfd-scaffolds",
+        ),
+        metadata={"run_name": "demo-rfd001"},
+    )
+
+    submission = node.submit_remote(
+        _context(
+            node_id="ligandmpnn-demo-rfd001-d000",
+            inputs={"rfd_output": [rfd_artifact]},
+            tmp_path=tmp_path,
+        )
+    )
+
+    assert submission.function_name == "ligandmpnn_run"
+    assert submission.function_call.object_id == "fc-ligandmpnn"
+    assert submission.metadata == {
+        "rfd_run_name": "demo-rfd001",
+        "design_index": "0",
+        "redesigned_residues": "A1 A2",
+    }
+    assert select_calls == {
+        "rfd_output_storage_path": "demo-rfd001/rfd-scaffolds",
+        "rfd_run_name": "demo-rfd001",
+        "design_index": 0,
+    }
+    assert ligandmpnn_calls["run_name"] == "demo-rfd001-d000-mpnn"
+    assert ligandmpnn_calls["script_mode"] == "run"
+    assert ligandmpnn_calls["struct_bytes"] == b"ATOM\n"
+    assert ligandmpnn_calls["seeds"] == [7, 11]
+    assert ligandmpnn_calls["cli_args"] == ligandmpnn_app.build_ligandmpnn_cli_args(
+        script_mode="run",
+        model_type="protein_mpnn",
+        batch_size=4,
+        number_of_batches=3,
+        parse_atoms_with_zero_occupancy=True,
+        pack_side_chains=True,
+        number_of_packs_per_design=5,
+        sc_num_samples=7,
+        repack_everything=True,
+        redesigned_residues="A1 A2",
+    )
+
+    processed = node.process_remote_result(
+        AppRunResult(
+            status=AppRunStatus.SUCCEEDED,
+            outputs=[
+                AppOutput(
+                    name="LigandMPNN_outputs",
+                    kind=ArtifactKind.ARCHIVE,
+                    storage=InlineBytes(
+                        data=b"tarball",
+                        filename="demo-rfd001-d000-mpnn_LigandMPNN.tar.zst",
+                        media_type=ZSTD_MEDIA_TYPE,
+                    ),
+                )
+            ],
+        ),
+        submission.metadata,
+    )
+
+    assert processed.outputs[0].metadata == {
+        "rfd_run_name": "demo-rfd001",
+        "design_index": "0",
+        "redesigned_residues": "A1 A2",
+    }
 
 
 def test_rfd_ligandmpnn_summary_reports_design_artifacts(tmp_path: Path) -> None:

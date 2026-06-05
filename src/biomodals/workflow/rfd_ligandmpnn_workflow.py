@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import pickle
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -36,6 +36,7 @@ from biomodals.schema import (
 from biomodals.workflow.core import (
     AppBackedNode,
     NodeRunContext,
+    RemoteNodeSubmission,
     Workflow,
     WorkflowNativeNode,
     orchestrator,
@@ -81,7 +82,7 @@ class LigandMPNNDesignSettings:
 
 
 @dataclass(frozen=True)
-class RFDLigandMPNNModalNamespace:
+class WorkflowModalNamespace:
     """Hydrated Modal objects carried across the orchestrator boundary."""
 
     rfdiffusion_infer: modal.Function
@@ -91,8 +92,7 @@ class RFDLigandMPNNModalNamespace:
 
 @app.function(
     image=runtime_image,
-    cpu=0.125,
-    memory=(512, 4096),
+    memory=(512, 16384),
     timeout=CONF.timeout,
     volumes={RFDIFFUSION_OUTPUT_MOUNTPOINT: RFDIFFUSION_OUTPUT_VOLUME},
 )
@@ -195,10 +195,8 @@ class RFdiffusionTrajectoryNode(AppBackedNode):
     contigs: str
     hotspot_res: str
     num_designs: int
-    modal_namespace: RFDLigandMPNNModalNamespace = field(
-        repr=False,
-        compare=False,
-        metadata={"dag_hash": False},
+    modal_namespace: WorkflowModalNamespace = field(
+        repr=False, compare=False, metadata={"dag_hash": False}
     )
     noise_scale_ca: float = 1.0
     noise_scale_frame: float = 1.0
@@ -206,11 +204,11 @@ class RFdiffusionTrajectoryNode(AppBackedNode):
     execution_policy: NodeExecutionPolicy = NodeExecutionPolicy.RESUME
     placement: NodePlacement = NodePlacement.REMOTE
 
-    def run(self, context: NodeRunContext) -> AppRunResult:
-        """Run RFdiffusion and return the app-compatible output directory result."""
+    def submit_remote(self, context: NodeRunContext) -> RemoteNodeSubmission:
+        """Submit the RFdiffusion app function directly from the orchestrator."""
         safe_run_name = sanitize_filename(self.run_name)
-        return AppRunResult.model_validate(
-            self.modal_namespace.rfdiffusion_infer.remote(
+        return RemoteNodeSubmission(
+            function_call=self.modal_namespace.rfdiffusion_infer.spawn(
                 input_pdb_bytes=self.pdb_content,
                 input_pdb_name=self.input_pdb_name,
                 run_name=safe_run_name,
@@ -222,7 +220,8 @@ class RFdiffusionTrajectoryNode(AppBackedNode):
                     noise_scale_frame=self.noise_scale_frame,
                     rfd_args=self.rfd_args,
                 ),
-            )
+            ),
+            function_name="rfdiffusion_infer",
         )
 
 
@@ -233,17 +232,16 @@ class LigandMPNNDesignNode(AppBackedNode):
     rfd_run_name: str
     design_index: int
     run_name: str
-    modal_namespace: RFDLigandMPNNModalNamespace = field(
-        repr=False,
-        compare=False,
-        metadata={"dag_hash": False},
+    modal_namespace: WorkflowModalNamespace = field(
+        repr=False, compare=False, metadata={"dag_hash": False}
     )
     settings: LigandMPNNDesignSettings
-    execution_policy: NodeExecutionPolicy = NodeExecutionPolicy.RESUME
+    execution_policy: NodeExecutionPolicy = NodeExecutionPolicy.RERUN
     placement: NodePlacement = NodePlacement.REMOTE
 
-    def run(self, context: NodeRunContext) -> AppRunResult:
-        """Select one RFdiffusion PDB and run LigandMPNN in run mode."""
+    def _select_ligandmpnn_inputs(
+        self, context: NodeRunContext
+    ) -> tuple[bytes, str, dict[str, str]]:
         rfd_artifacts = context.inputs.get("rfd_output") or []
         if len(rfd_artifacts) != 1:
             raise ValueError(
@@ -267,6 +265,21 @@ class LigandMPNNDesignNode(AppBackedNode):
         if not isinstance(pdb_bytes, bytes):
             raise TypeError("RFdiffusion selector must return PDB bytes")
         redesigned_residues = str(selected["redesigned_residues"])
+        return (
+            pdb_bytes,
+            redesigned_residues,
+            {
+                "rfd_run_name": safe_rfd_run_name,
+                "design_index": str(self.design_index),
+                "redesigned_residues": redesigned_residues,
+            },
+        )
+
+    def submit_remote(self, context: NodeRunContext) -> RemoteNodeSubmission:
+        """Submit the LigandMPNN app function directly from the orchestrator."""
+        pdb_bytes, redesigned_residues, metadata = self._select_ligandmpnn_inputs(
+            context
+        )
         cli_args = ligandmpnn_app.build_ligandmpnn_cli_args(
             script_mode="run",
             model_type=self.settings.model_type,
@@ -279,19 +292,30 @@ class LigandMPNNDesignNode(AppBackedNode):
             repack_everything=True,
             redesigned_residues=redesigned_residues,
         )
-        result = AppRunResult.model_validate(
-            self.modal_namespace.ligandmpnn_run.remote(
+        return RemoteNodeSubmission(
+            function_call=self.modal_namespace.ligandmpnn_run.spawn(
                 run_name=sanitize_filename(self.run_name),
                 script_mode="run",
                 struct_bytes=pdb_bytes,
                 seeds=list(self.settings.seeds),
                 cli_args=cli_args,
-            )
+            ),
+            function_name="ligandmpnn_run",
+            metadata=metadata,
         )
+
+    def process_remote_result(
+        self, result: AppRunResult, metadata: Mapping[str, object]
+    ) -> AppRunResult:
+        """Attach workflow selection metadata to LigandMPNN app outputs."""
+        result = AppRunResult.model_validate(result)
         for output in result.outputs:
-            output.metadata.setdefault("rfd_run_name", safe_rfd_run_name)
-            output.metadata.setdefault("design_index", str(self.design_index))
-            output.metadata.setdefault("redesigned_residues", redesigned_residues)
+            output.metadata.setdefault("rfd_run_name", str(metadata["rfd_run_name"]))
+            output.metadata.setdefault("design_index", str(metadata["design_index"]))
+            output.metadata.setdefault(
+                "redesigned_residues",
+                str(metadata["redesigned_residues"]),
+            )
         return result
 
 
@@ -416,7 +440,7 @@ def build_rfd_ligandmpnn_workflow(
         sanitize_filename(run_namespace) if run_namespace is not None else input_stem
     )
     workflow = Workflow("rfd_ligandmpnn")
-    modal_namespace = RFDLigandMPNNModalNamespace(
+    modal_namespace = WorkflowModalNamespace(
         rfdiffusion_infer=rfdiffusion_app.rfdiffusion_infer,
         ligandmpnn_run=ligandmpnn_app.ligandmpnn_run,
         select_rfd_design=select_rfdiffusion_design,

@@ -27,6 +27,7 @@ from biomodals.schema import (
 from biomodals.workflow.core import (
     AppBackedNode,
     NodeRunContext,
+    RemoteNodeSubmission,
     Workflow,
     WorkflowNativeNode,
     orchestrator,
@@ -85,8 +86,7 @@ class PPIFlowWorkflowNode(AppBackedNode):
     execution_policy: NodeExecutionPolicy = NodeExecutionPolicy.RERUN
     placement: NodePlacement = NodePlacement.REMOTE
 
-    def run(self, context: NodeRunContext) -> AppRunResult:
-        """Run a workflow-compatible PPIFlow app step."""
+    def _app_kwargs(self, context: NodeRunContext) -> dict[str, object]:
         if self.step_name not in PPI_FLOW_APP_STEPS:
             raise NotImplementedError(
                 f"PPIFlow workflow step {self.step_name!r} does not yet have a "
@@ -101,11 +101,15 @@ class PPIFlowWorkflowNode(AppBackedNode):
             str(self.config.get("run_name") or f"{context.run_id}-{self.step_name}")
         )
         app_args = ppiflow_app.PPIFlowArgs.model_validate({"args": raw_args})
-        return AppRunResult.model_validate(
-            self.modal_namespace.ppiflow_run.remote(
-                args=app_args,
-                run_name=run_name,
-            )
+        return {"args": app_args, "run_name": run_name}
+
+    def submit_remote(self, context: NodeRunContext) -> RemoteNodeSubmission:
+        """Submit the PPIFlow app function directly from the orchestrator."""
+        return RemoteNodeSubmission(
+            function_call=self.modal_namespace.ppiflow_run.spawn(
+                **self._app_kwargs(context)
+            ),
+            function_name="ppiflow_run",
         )
 
 
