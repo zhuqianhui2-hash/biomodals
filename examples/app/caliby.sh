@@ -6,12 +6,12 @@ fi
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 BIOMODALS_ROOT=$(realpath "${SCRIPT_DIR}/../../")
+ENTRY_BIN=$(realpath "${BIOMODALS_ROOT}/biomodals")
 
 TASK="${CALIBY_EXAMPLE_TASK:-ensemble_design}"
 DESIGN_YAML="${CALIBY_DESIGN_YAML:-${SCRIPT_DIR}/../data/caliby/caliby_design.yaml}"
 ENSEMBLE_YAML="${CALIBY_ENSEMBLE_YAML:-${SCRIPT_DIR}/../data/caliby/caliby_ensemble_design.yaml}"
 OUT_DIR="${CALIBY_OUT_DIR:-${PWD}}"
-APP_CMD=(uv run biomodals app run caliby --)
 
 # Caliby upstream exposes many shell scripts, but most examples are parameter
 # presets around a few core Python entrypoints. The Biomodals example keeps the
@@ -24,18 +24,16 @@ APP_CMD=(uv run biomodals app run caliby --)
 
 case "${TASK}" in
     design)
-        (cd "${BIOMODALS_ROOT}" && "${APP_CMD[@]}" \
+        "${ENTRY_BIN}" app r caliby -- \
             --input-yaml "${DESIGN_YAML}" \
             --task design \
             --out-dir "${OUT_DIR}"
-        )
         ;;
     ensemble_design)
-        (cd "${BIOMODALS_ROOT}" && "${APP_CMD[@]}" \
+        "${ENTRY_BIN}" app r caliby -- \
             --input-yaml "${ENSEMBLE_YAML}" \
             --task ensemble_design \
             --out-dir "${OUT_DIR}"
-        )
         ;;
     *)
         cat <<EOF
