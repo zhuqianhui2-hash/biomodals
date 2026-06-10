@@ -9,6 +9,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 import yaml
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from biomodals.app.design import caliby_app
@@ -89,7 +90,6 @@ def test_reuses_shared_helpers_and_keeps_local_helpers_specific() -> None:
     assert "def stage_local_conformer_dir(" not in source
     assert "def package_caliby_outputs(" not in source
     assert '"python3",' not in source
-    assert "def stage_local_conformer_dir(" not in source
 
 
 def test_output_volume_path_helper_returns_relative_volume_path(tmp_path: Path) -> None:
@@ -631,6 +631,26 @@ def test_submit_ensemble_design_cleans_inputs_before_generating_ensembles(
     assert caliby_app.run_caliby_generate_ensembles.kwargs[0]["pdb_dir"] == (
         "/remote/cleaned_structures"
     )
+
+
+def test_submit_design_with_ensemble_yaml_reports_task_mismatch(tmp_path: Path) -> None:
+    input_yaml = tmp_path / "caliby_ensemble.yaml"
+    input_yaml.write_text(
+        "input_path: examples/data/caliby/native_pdbs\n"
+        "run_name: demo\n"
+        "num_samples_per_pdb: 8\n",
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        caliby_app.submit_caliby_task.info.raw_f(
+            input_yaml=str(input_yaml),
+            task="design",
+            out_dir=None,
+        )
+
+    assert "Input YAML does not match task='design'" in str(exc_info.value)
+    assert "num_samples_per_pdb" in str(exc_info.value)
+    assert "--task ensemble_design" in str(exc_info.value)
 
 
 def test_submit_design_prints_modal_volume_path_without_local_download(
