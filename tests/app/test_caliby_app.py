@@ -45,14 +45,34 @@ def test_app_contract() -> None:
     assert "pack_sidechains" not in signature.parameters
 
 
+def test_app_info_groups_caliby_metadata() -> None:
+    assert caliby_app.APP_INFO.structure_suffixes == (".pdb", ".cif")
+    assert caliby_app.APP_INFO.valid_tasks == frozenset({"design", "ensemble_design"})
+    assert caliby_app.APP_INFO.design_model_by_task == {
+        "design": "soluble_caliby_v1",
+        "ensemble_design": "caliby",
+    }
+    assert caliby_app.APP_INFO.default_num_workers == 2
+    assert caliby_app.APP_INFO.default_batch_size == 4
+    assert caliby_app.APP_INFO.default_ensemble_batch_size == 8
+    assert caliby_app.APP_INFO.proteinmpnn_model_source == (
+        caliby_app.APP_INFO.full_model_volume_mount / "LigandMPNN"
+    )
+    assert caliby_app.APP_INFO.protpardelle_model_source == (
+        caliby_app.APP_INFO.full_model_volume_mount / "Caliby" / "protpardelle-1c"
+    )
+
+    source = Path(caliby_app.__file__).read_text()
+    assert "VALID_TASKS =" not in source
+    assert "DESIGN_MODEL_BY_TASK =" not in source
+    assert "DEFAULT_BATCH_SIZE =" not in source
+
+
 def test_reuses_shared_helpers_and_keeps_local_helpers_specific() -> None:
     from biomodals.helper import io as helper_io
-    from biomodals.helper import shell as helper_shell
 
     assert caliby_app.build_local_output_path is helper_io.build_local_output_path
     assert caliby_app.write_local_tarball is helper_io.write_local_tarball
-    assert caliby_app.sanitize_filename is helper_shell.sanitize_filename
-    assert caliby_app.softlink_dir is helper_shell.softlink_dir
 
     source = Path(caliby_app.__file__).read_text()
     assert "def validate_run_name(" not in source
@@ -69,6 +89,7 @@ def test_reuses_shared_helpers_and_keeps_local_helpers_specific() -> None:
     assert "def stage_local_conformer_dir(" not in source
     assert "def package_caliby_outputs(" not in source
     assert '"python3",' not in source
+    assert "def stage_local_conformer_dir(" not in source
 
 
 def test_output_volume_path_helper_returns_relative_volume_path(tmp_path: Path) -> None:
@@ -117,15 +138,14 @@ def test_caliby_design_config_validates_yaml_fields() -> None:
         })
 
 
-def test_caliby_ensemble_config_requires_one_input_mode() -> None:
-    with pytest.raises(ValueError, match="Exactly one"):
+def test_caliby_ensemble_config_requires_input_path() -> None:
+    with pytest.raises(ValueError, match="input_path"):
         caliby_app.CalibyEnsembleDesignConfig.model_validate({
             "run_name": "demo",
         })
 
-    with pytest.raises(ValueError, match="Exactly one"):
+    with pytest.raises(ValueError, match="conformer_dir"):
         caliby_app.CalibyEnsembleDesignConfig.model_validate({
-            "input_path": "inputs",
             "conformer_dir": "conformers",
             "run_name": "demo",
         })
@@ -140,10 +160,10 @@ def test_caliby_ensemble_config_requires_one_input_mode() -> None:
     })
 
     assert conf.input_path == "inputs"
-    assert conf.conformer_dir is None
-    assert conf.num_samples_per_pdb == caliby_app.DEFAULT_NUM_SAMPLES_PER_PDB
+    assert conf.num_samples_per_pdb == caliby_app.APP_INFO.default_num_samples_per_pdb
     assert conf.max_num_conformers == 8
     assert conf.include_primary_conformer is False
+    assert "conformer_dir" not in caliby_app.CalibyEnsembleDesignConfig.model_fields
     assert "pack_sidechains" not in caliby_app.CalibyEnsembleDesignConfig.model_fields
     assert conf.sampling_yaml_path == "custom.yaml"
     assert conf.seed == 123
@@ -158,9 +178,13 @@ def test_caliby_ensemble_config_requires_one_input_mode() -> None:
 def test_discover_structure_files_accepts_file_and_directory(tmp_path: Path) -> None:
     pdb = tmp_path / "a.pdb"
     cif = tmp_path / "b.cif"
+    mmcif = tmp_path / "c.mmcif"
+    pdb_gz = tmp_path / "d.pdb.gz"
     ignored = tmp_path / "notes.txt"
     pdb.write_text("ATOM\n")
     cif.write_text("data_b\n")
+    mmcif.write_text("data_c\n")
+    pdb_gz.write_text("not really gzip\n")
     ignored.write_text("ignore\n")
 
     assert caliby_app.discover_structure_files(pdb) == [pdb.resolve()]
@@ -168,6 +192,10 @@ def test_discover_structure_files_accepts_file_and_directory(tmp_path: Path) -> 
         pdb.resolve(),
         cif.resolve(),
     ]
+    with pytest.raises(ValueError, match="Unsupported structure file suffix"):
+        caliby_app.discover_structure_files(mmcif)
+    with pytest.raises(ValueError, match="Unsupported structure file suffix"):
+        caliby_app.discover_structure_files(pdb_gz)
 
 
 def test_discover_structure_files_rejects_empty_directory(tmp_path: Path) -> None:
@@ -274,6 +302,26 @@ def test_stage_optional_local_file_uploads_to_output_volume(tmp_path: Path) -> N
     ]
 
 
+def test_stage_optional_local_file_fails_fast_for_missing_local_path() -> None:
+    with pytest.raises(FileNotFoundError, match="remote:"):
+        caliby_app.stage_optional_local_file(
+            "missing_constraints.csv",
+            "demo",
+            "constraints",
+        )
+
+
+def test_stage_optional_local_file_accepts_explicit_remote_path() -> None:
+    assert (
+        caliby_app.stage_optional_local_file(
+            "remote:/mnt/Caliby/demo/constraints.csv",
+            "demo",
+            "constraints",
+        )
+        == "/mnt/Caliby/demo/constraints.csv"
+    )
+
+
 def test_run_caliby_seq_des_writes_expected_command(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -333,26 +381,43 @@ def test_run_caliby_seq_des_writes_expected_command(
     assert fake_volume.commit_count >= 1
 
 
-def test_run_caliby_generate_ensembles_stages_model_layout(
+def test_run_caliby_generate_ensembles_adapts_model_layout_with_symlinks(
     monkeypatch, tmp_path: Path
 ) -> None:
     fake_volume = _FakeOutputVolume()
     commands: list[list[str]] = []
     links: list[tuple[Path, Path]] = []
     output_mountpoint = tmp_path / "outputs"
-    model_mountpoint = tmp_path / "models"
+    model_params_mount = tmp_path / "caliby-model-params"
+    model_volume_mount = tmp_path / "models"
     input_dir = output_mountpoint / "demo" / "inputs" / "structures"
     input_dir.mkdir(parents=True)
     (input_dir / "native.cif").write_text("data_native\n")
-    (model_mountpoint / "LigandMPNN").mkdir(parents=True)
-    (model_mountpoint / "Caliby" / "protpardelle-1c").mkdir(parents=True)
+    proteinmpnn_source = model_volume_mount / "LigandMPNN"
+    protpardelle_source = model_volume_mount / "Caliby" / "protpardelle-1c"
+    proteinmpnn_source.mkdir(parents=True)
+    protpardelle_source.mkdir(parents=True)
     original_output_mountpoint = caliby_app.CONF.output_volume_mountpoint
-    original_model_mountpoint = caliby_app.CONF.model_volume_mountpoint
     original_volume = caliby_app.CONF.output_volume
+    original_model_params_mount = caliby_app.APP_INFO.caliby_model_params_mount
+    original_full_model_volume_mount = caliby_app.APP_INFO.full_model_volume_mount
+    original_proteinmpnn_source = caliby_app.APP_INFO.proteinmpnn_model_source
+    original_protpardelle_source = caliby_app.APP_INFO.protpardelle_model_source
 
     object.__setattr__(caliby_app.CONF, "output_volume_mountpoint", output_mountpoint)
-    object.__setattr__(caliby_app.CONF, "model_volume_mountpoint", model_mountpoint)
     object.__setattr__(caliby_app.CONF, "output_volume", fake_volume)
+    object.__setattr__(
+        caliby_app.APP_INFO, "caliby_model_params_mount", model_params_mount
+    )
+    object.__setattr__(
+        caliby_app.APP_INFO, "full_model_volume_mount", model_volume_mount
+    )
+    object.__setattr__(
+        caliby_app.APP_INFO, "proteinmpnn_model_source", proteinmpnn_source
+    )
+    object.__setattr__(
+        caliby_app.APP_INFO, "protpardelle_model_source", protpardelle_source
+    )
 
     def fake_softlink_dir(src, dst):
         links.append((Path(src), Path(dst)))
@@ -390,23 +455,32 @@ def test_run_caliby_generate_ensembles_stages_model_layout(
         object.__setattr__(
             caliby_app.CONF, "output_volume_mountpoint", original_output_mountpoint
         )
-        object.__setattr__(
-            caliby_app.CONF, "model_volume_mountpoint", original_model_mountpoint
-        )
         object.__setattr__(caliby_app.CONF, "output_volume", original_volume)
+        object.__setattr__(
+            caliby_app.APP_INFO,
+            "caliby_model_params_mount",
+            original_model_params_mount,
+        )
+        object.__setattr__(
+            caliby_app.APP_INFO,
+            "full_model_volume_mount",
+            original_full_model_volume_mount,
+        )
+        object.__setattr__(
+            caliby_app.APP_INFO, "proteinmpnn_model_source", original_proteinmpnn_source
+        )
+        object.__setattr__(
+            caliby_app.APP_INFO,
+            "protpardelle_model_source",
+            original_protpardelle_source,
+        )
 
     assert links == [
-        (
-            model_mountpoint / "LigandMPNN",
-            Path("/tmp/caliby-model-params/proteinmpnn"),  # noqa: S108
-        ),
-        (
-            model_mountpoint / "Caliby" / "protpardelle-1c",
-            Path("/tmp/caliby-model-params/protpardelle-1c"),  # noqa: S108
-        ),
+        (proteinmpnn_source, model_params_mount / "proteinmpnn"),
+        (protpardelle_source, model_params_mount / "protpardelle-1c"),
     ]
     assert commands
-    assert "model_params_path=/tmp/caliby-model-params" in commands[0]
+    assert f"model_params_path={model_params_mount}" in commands[0]
     assert result["conformer_dir"].endswith("/demo/outputs/ensembles/cc95-epoch3490")
     assert fake_volume.reload_count == 1
     assert fake_volume.commit_count >= 1
@@ -676,7 +750,9 @@ def test_caliby_example_script_uses_caliby_data_and_run_command() -> None:
     assert "../data/caliby/caliby_design.yaml" in source
     assert "../data/caliby/caliby_ensemble_design.yaml" in source
     assert "--input-yaml" in source
-    assert "app run caliby" in source
+    assert 'ENTRY_BIN=$(realpath "${BIOMODALS_ROOT}/biomodals")' in source
+    assert "app r caliby" in source
+    assert "uv run biomodals" not in source
     assert "download_models" not in source
     assert "existing_conformers" not in source
     assert "sidechain" not in source
