@@ -105,12 +105,13 @@ def run_command_with_log(
     """Run a shell command and log output to a file."""
     import shlex
     import subprocess as sp
+    import sys
     from datetime import datetime, timedelta
     from time import time
 
-    try:
+    if sys.version_info >= (3, 11):  # noqa: UP036
         from datetime import UTC
-    except ImportError:
+    else:
         from datetime import timezone
 
         UTC = timezone.utc  # noqa: UP017
@@ -182,8 +183,8 @@ def find_with_fd(dir_path: str | Path, file_pattern: str = ".", *args) -> list[s
     if not Path(dir_path).exists():
         raise FileNotFoundError(dir_path)
 
-    cmd = [fd_binary, file_pattern, str(dir_path), *args]
-    return run_command(cmd, verbose=False)
+    cmd = [fd_binary, file_pattern, *args]
+    return run_command(cmd, verbose=False, cwd=str(dir_path))
 
 
 def warmup_directory(dir_path: str | Path, file_pattern: str = ".") -> None:

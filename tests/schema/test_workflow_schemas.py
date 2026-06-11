@@ -20,6 +20,7 @@ from biomodals.schema import (
     VolumePath,
     WorkflowArtifact,
 )
+from biomodals.schema.storage import ZSTD_MEDIA_TYPE
 
 
 def _valid_app_config(**overrides: object) -> AppConfig:
@@ -129,14 +130,48 @@ def test_inline_bytes_round_trip() -> None:
     assert isinstance(loaded.outputs[0].storage, InlineBytes)
     assert loaded.outputs[0].storage.data == b"hello\n"
     assert loaded.outputs[0].storage.filename == "report.txt"
-    assert "aGVsbG8K" not in dumped
+    assert "aGVsbG8K" in dumped
     assert "archive_format" not in InlineBytes.model_fields
 
 
-def test_inline_bytes_rejects_binary_data_and_archive_metadata() -> None:
-    with pytest.raises(ValidationError, match="UTF-8"):
-        InlineBytes(data=b"\xff\x00", filename="binary.bin")
+def test_inline_bytes_allows_zstd_binary_data_round_trip() -> None:
+    result = AppRunResult(
+        status=AppRunStatus.SUCCEEDED,
+        outputs=[
+            AppOutput(
+                name="packed",
+                kind=ArtifactKind.ARCHIVE,
+                storage=InlineBytes(
+                    data=b"\xff\x00",
+                    filename="packed.tar.zst",
+                    media_type=ZSTD_MEDIA_TYPE,
+                ),
+            )
+        ],
+    )
 
+    dumped = result.model_dump_json()
+    loaded = AppRunResult.model_validate_json(dumped)
+
+    assert "_wA=" in dumped
+    assert isinstance(loaded.outputs[0].storage, InlineBytes)
+    assert loaded.outputs[0].storage.data == b"\xff\x00"
+    assert loaded.outputs[0].storage.media_type == ZSTD_MEDIA_TYPE
+
+
+def test_inline_bytes_uses_pydantic_json_bytes_config() -> None:
+    payload = InlineBytes(data=b"\xff\x00", filename="binary.bin")
+
+    dumped = payload.model_dump_json()
+    loaded = InlineBytes.model_validate_json(dumped)
+
+    assert InlineBytes.model_config["ser_json_bytes"] == "base64"
+    assert InlineBytes.model_config["val_json_bytes"] == "base64"
+    assert "_wA=" in dumped
+    assert loaded.data == b"\xff\x00"
+
+
+def test_inline_bytes_rejects_unknown_fields() -> None:
     with pytest.raises(ValidationError, match="archive_format"):
         InlineBytes(data=b"text", filename="archive.zip", archive_format="zip")  # type: ignore[ty:unknown-argument]
 

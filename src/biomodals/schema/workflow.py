@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 from typing import Any
 
@@ -10,13 +11,12 @@ from pydantic import BaseModel, Field
 from biomodals.schema.storage import VolumePath
 
 # < Python 3.11 guards
-try:
+if sys.version_info >= (3, 11):  # noqa: UP036
     from datetime import UTC
     from enum import StrEnum
-except ImportError:
+else:
     from datetime import timezone  # noqa: I001
-
-    from backports.strenum import StrEnum  # type: ignore[ty:unresolved-import] # noqa: UP035,I001
+    from backports.strenum import StrEnum  # noqa: UP035,I001
 
     UTC = timezone.utc  # noqa: UP017
 

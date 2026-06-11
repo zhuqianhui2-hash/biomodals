@@ -5,8 +5,12 @@ Use this guide when creating or changing files under
 `src/biomodals/schema/`.
 
 Use `src/biomodals/workflow/shortmd_workflow.py` as the primary end-to-end
-workflow example. Ignore `src/biomodals/workflow/ppiflow_workflow.py` as a
-reference pattern for now; it is expected to be refactored.
+workflow example. Use
+`src/biomodals/workflow/rfd_ligandmpnn_workflow.py` as the reference for
+workflows that select files from one app's volume-backed output and fan those
+files out into another app's workflow-compatible function. Ignore
+`src/biomodals/workflow/ppiflow_workflow.py` as a reference pattern for now; it
+is expected to be refactored.
 
 ## Vocabulary
 
@@ -52,6 +56,29 @@ DAG construction, build a static fan-out DAG, keep app-specific runtime work in
 included app functions, keep workflow-only adapters in the workflow module, and
 return durable artifacts as `AppRunResult` outputs.
 
+## RFD LigandMPNN Reference Pattern
+
+`rfd_ligandmpnn_workflow.py` is the current reference for workflows that chain
+workflow-compatible app functions across an app-owned output volume. Its data
+flow is:
+
+1. The local entrypoint reads one local PDB, sanitizes `run_id`, builds a static
+   fan-out DAG, and submits it to the included `WorkflowOrchestrator`.
+2. Each `RFdiffusionTrajectoryNode` calls the RFdiffusion app's
+   workflow-compatible remote function and receives a durable `VolumePath`
+   directory plus log artifact metadata.
+3. A workflow-native remote selector reads RFdiffusion PDB/TRB pairs from the
+   RFdiffusion output volume, using RFdiffusion metadata to derive the residues
+   downstream LigandMPNN should redesign.
+4. Each `LigandMPNNDesignNode` calls the LigandMPNN app's workflow-compatible
+   remote function with PDB bytes and MPNN CLI args, receiving a small inline
+   zstd archive that the workflow runtime materializes.
+5. The summary node reports all LigandMPNN archive artifacts.
+
+Use this pattern when the source app owns durable outputs but downstream nodes
+need selected small files or derived arguments. Keep selector/adaptation logic in
+the workflow module unless it is also useful to the standalone app.
+
 ## Schema Boundaries
 
 Shared contracts live in `biomodals.schema`.
@@ -65,10 +92,15 @@ the transition from `biomodals.app.config`.
 
 Workflow-compatible app functions return `AppRunResult`. The workflow runtime
 materializes each `AppOutput` into one or more `WorkflowArtifact` manifests.
-Inline byte outputs are for UTF-8 text bytes only. They must be written into the
-workflow run volume before they cross a node boundary. Binary outputs, archives,
-and other non-text bytes must be written to deterministic volume paths and
-returned as `VolumePath` storage.
+Inline byte outputs are for UTF-8 text bytes or small zstd archives with
+`media_type="application/zstd"`. `InlineBytes` should rely on Pydantic's
+`ser_json_bytes` and `val_json_bytes` configuration for JSON byte encoding and
+decoding; keep text-vs-archive policy in the workflow runtime materialization
+layer rather than adding manual byte decoding validators to the shared schema.
+Inline byte outputs are materialized into the workflow run volume when the
+runtime records workflow artifacts. Other binary outputs, large archives, and
+non-text bytes must be written to deterministic volume paths and returned as
+`VolumePath` storage.
 
 `AppRunResult.logs` are durable workflow artifacts too. The runtime writes log
 outputs under `nodes/<node-id>/attempts/<attempt-id>/logs/` and records
@@ -114,11 +146,27 @@ filtering, ranking, reporting, and small manifest transforms.
 Use `REMOTE` placement for long-running work, app-backed work, and work that
 benefits from failure isolation.
 
-The runtime routes `REMOTE` nodes through an injected remote-node runner when
-one is available. The Modal orchestrator supplies a thin remote runner that
-executes one node in a separate Modal function and commits workflow volume
-writes after node code returns. Unit tests use fake runners and must not call
-live Modal APIs.
+Every `REMOTE` node must implement direct remote submission:
+`submit_remote(context)` returns a `RemoteNodeSubmission` containing the actual
+Modal `FunctionCall`, a readable function name, and any small JSON metadata
+needed to post-process or recover the result. If the remote result is not
+already an `AppRunResult`, or if workflow metadata must be attached before
+artifact materialization, implement `process_remote_result(result, metadata)`.
+`process_remote_result(...)` is part of the node contract and defaults to
+`AppRunResult.model_validate(result)`. `AppBackedNode` and `REMOTE`
+`WorkflowNativeNode` implementations inherit a default `run()` that submits the
+remote call, waits for `.get()`, and calls `process_remote_result(...)`.
+`ORCHESTRATOR` `WorkflowNativeNode` implementations must still implement
+`run(context)` directly. The runtime records the direct call ID in the ledger
+before waiting for the result and reuses the recorded processed `AppRunResult`
+during recovery.
+
+Do not add a generic remote-node wrapper that accepts arbitrary workflow nodes.
+Workflow-native file-management adapters and app-backed nodes that combine
+multiple non-`AppRunResult` app calls should expose their own workflow-local
+Modal functions or submit the primary app call directly and adapt the raw result
+with `process_remote_result(...)`. Unit tests use fake `FunctionCall` objects
+and must not call live Modal APIs.
 
 ## Ledger Layout
 
@@ -133,17 +181,22 @@ The first durable run layout is:
       attempts/
         <attempt-id>/
           logs/
-          raw_outputs/
-          materialized_outputs/
+            <log-artifact-id>/
+          <artifact-id>/
       cache/
   artifacts/
-    <artifact-id>/
+    <artifact-id>.json
   final/
 ```
 
 The workflow ledger is one SQLite database per run. The orchestrator is the only
 ledger writer. Remote nodes write deterministic output files and logs, then the
 orchestrator reloads the volume, reconciles those files, and updates the ledger.
+Inline byte outputs are materialized once into
+`nodes/<node-id>/attempts/<attempt-id>/<artifact-id>/`. Inline logs are
+materialized once under `nodes/<node-id>/attempts/<attempt-id>/logs/<artifact-id>/`.
+Store only materialized `VolumePath` app-result JSON in `attempts.app_result_json`;
+do not store base64 `InlineBytes` payloads in SQLite.
 
 Ledger updates mutate SQLite rows directly. Do not preserve obsolete
 Pydantic-status update patterns such as `model_copy(update=...)` for ledger
@@ -226,9 +279,10 @@ must not perform deployed app lookups, import workflow app functions by name, or
 handle hydration details for workflow-specific apps. Domain-specific input
 staging and DAG construction belong in top-level workflow scripts.
 
-Keep the public orchestrator method surface minimal. The intended remote methods
-are `WorkflowOrchestrator.run(...)` for a whole workflow run and
-`WorkflowOrchestrator.run_node(...)` for isolated remote node execution. Do not
+Keep the public orchestrator method surface minimal. The intended remote method
+for user-facing submission is `WorkflowOrchestrator.run(...)`. The orchestrator
+does not expose a generic per-node execution method; runtime-managed `REMOTE`
+nodes submit the real Modal function via `RemoteNodeSubmission` instead. Do not
 add convenience wrappers or alternate submission APIs unless they cover a large
 missing capability or a clear ergonomics gap.
 
@@ -263,6 +317,13 @@ classes serialize with stable canonical module names before being submitted to
 the included `WorkflowOrchestrator`. Its user-facing flags should mirror
 `biomodals app run`, including Modal mode, detach, timeout, and pass-through
 workflow flags after `--`.
+The run command also exposes `--dry-run`, which forwards `--dry-run` to the
+selected workflow local entrypoint. User-facing workflow entrypoints should
+accept `dry_run: bool = False`; when set, they should build and validate the DAG,
+call `print_workflow_dag(workflow.validate())`, and return before constructing
+or submitting the orchestrator. DAG graph output should stay compact and print
+node ids, placement, workflow node class qualnames, and dependencies without
+module-qualified class names.
 The command may accept workflow paths only when they resolve to package-qualified
 modules under the Biomodals workflow package. Reject ad hoc workflow files that
 cannot be imported by a stable package module path.
@@ -276,14 +337,15 @@ Workflow scripts should compose every Modal app they need at import time. Define
 dependency app names once on `AppConfig.depends_on_apps`, mirror that list into
 `CONF.tags["depends_on"]` for Modal UI visibility, and call
 `include_dependency_apps(app, CONF.depends_on_apps)` after including the shared
-orchestrator app.
+orchestrator app. Modal tag values cannot contain commas, so use a Modal-valid
+delimiter such as `"-".join(DEPENDENCY_APPS)`.
 
 ```python
 DEPENDENCY_APPS = ("gromacs",)
 CONF = AppConfig(
     name="ShortMDWorkflow",
     depends_on_apps=DEPENDENCY_APPS,
-    tags={"depends_on": ",".join(DEPENDENCY_APPS)},
+    tags={"depends_on": "-".join(DEPENDENCY_APPS)},
 )
 
 app = modal.App(CONF.name, image=runtime_image, tags=CONF.tags).include(
@@ -310,6 +372,11 @@ download or report outputs, print user messages, and return `None`.
 Workflow reuse happens through workflow-compatible remote app functions. These
 functions may reuse behavior from local entrypoints or existing remote
 functions, but they return `AppRunResult` and avoid local filesystem UX.
+When developing a new app that may be used by a workflow, ask whether it needs a
+workflow-compatible app function. If yes, coordinate with the app-development
+skill and use `rfdiffusion_app.py` as the reference for durable `VolumePath`
+outputs and `ligandmpnn_app.py` as the reference for small inline zstd archive
+outputs.
 
 For new Biomodals workflows that depend on other Biomodals apps, prefer
 included-app Modal handles over deployed-app lookup strings. Avoid
@@ -402,8 +469,9 @@ filenames may appear across workflow runs.
 
 Summary/report nodes should usually be `WorkflowNativeNode` instances with
 `ORCHESTRATOR` placement when they only aggregate manifests or emit text
-reports. Return reports as UTF-8 `InlineBytes`; return binary files,
-directories, and archives as durable `VolumePath` outputs.
+reports. Return reports as UTF-8 `InlineBytes`; return small zstd archives as
+`InlineBytes` with `media_type="application/zstd"`; return other binary files,
+directories, and large archives as durable `VolumePath` outputs.
 
 When adding a workflow-compatible app function, keep existing local entrypoint
 behavior unchanged and add a focused pytest contract test that does not call

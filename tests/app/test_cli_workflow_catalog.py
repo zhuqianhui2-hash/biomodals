@@ -92,6 +92,18 @@ class _FakeWorkflow:
         return self.functions[name]
 
 
+@dataclass
+class _SingleEntrypointWorkflow:
+    name: str = "shortmd"
+    module: str = "biomodals.workflow.shortmd_workflow"
+    path: Path = Path("src/biomodals/workflow/shortmd_workflow.py")
+    _entrypoint: str | None = "submit_shortmd_workflow"
+
+    def __post_init__(self) -> None:
+        self._local_entrypoint_idx = []
+        self.functions = []
+
+
 def test_workflow_run_requires_entrypoint_for_multiple_local_entrypoints(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -103,3 +115,49 @@ def test_workflow_run_requires_entrypoint_for_multiple_local_entrypoints(
     assert "contains multiple local entrypoints" in result.output
     assert "::first" in result.output
     assert "::second" in result.output
+
+
+def test_workflow_run_dry_run_forwards_entrypoint_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {}
+
+    def fake_run_command(command, **kwargs):
+        calls["command"] = command
+        calls["kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        "biomodals.cli._load_entry",
+        lambda *_args: _SingleEntrypointWorkflow(),
+    )
+    monkeypatch.setattr("biomodals.cli.run_command", fake_run_command)
+
+    result = runner.invoke(
+        app,
+        [
+            "workflow",
+            "run",
+            "shortmd",
+            "--dry-run",
+            "--",
+            "/inputs",
+            "--replicates",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls["command"][1:3] == ["-m", "modal"]
+    assert (
+        "biomodals.workflow.shortmd_workflow::submit_shortmd_workflow"
+        in calls["command"]
+    )
+    module_idx = calls["command"].index(
+        "biomodals.workflow.shortmd_workflow::submit_shortmd_workflow"
+    )
+    assert calls["command"][module_idx + 1 :] == [
+        "--dry-run",
+        "/inputs",
+        "--replicates",
+        "1",
+    ]

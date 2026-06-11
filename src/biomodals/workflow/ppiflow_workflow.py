@@ -27,9 +27,11 @@ from biomodals.schema import (
 from biomodals.workflow.core import (
     AppBackedNode,
     NodeRunContext,
+    RemoteNodeSubmission,
     Workflow,
     WorkflowNativeNode,
     orchestrator,
+    print_workflow_dag,
 )
 
 PPI_FLOW_OUTPUT_LAYOUT = (
@@ -43,7 +45,7 @@ PPI_FLOW_APP_STEPS = ("PPIFlowStep", "PartialStep")
 
 DEPENDENCY_APPS = ("ppiflow",)
 CONF = AppConfig(
-    tags={"depends_on": ",".join(DEPENDENCY_APPS)},
+    tags={"depends_on": "-".join(DEPENDENCY_APPS)},
     depends_on_apps=DEPENDENCY_APPS,
     name="PPIFlowWorkflow",
     package_name="biomodals-ppiflow-workflow",
@@ -85,8 +87,7 @@ class PPIFlowWorkflowNode(AppBackedNode):
     execution_policy: NodeExecutionPolicy = NodeExecutionPolicy.RERUN
     placement: NodePlacement = NodePlacement.REMOTE
 
-    def run(self, context: NodeRunContext) -> AppRunResult:
-        """Run a workflow-compatible PPIFlow app step."""
+    def _app_kwargs(self, context: NodeRunContext) -> dict[str, object]:
         if self.step_name not in PPI_FLOW_APP_STEPS:
             raise NotImplementedError(
                 f"PPIFlow workflow step {self.step_name!r} does not yet have a "
@@ -101,11 +102,15 @@ class PPIFlowWorkflowNode(AppBackedNode):
             str(self.config.get("run_name") or f"{context.run_id}-{self.step_name}")
         )
         app_args = ppiflow_app.PPIFlowArgs.model_validate({"args": raw_args})
-        return AppRunResult.model_validate(
-            self.modal_namespace.ppiflow_run.remote(
-                args=app_args,
-                run_name=run_name,
-            )
+        return {"args": app_args, "run_name": run_name}
+
+    def submit_remote(self, context: NodeRunContext) -> RemoteNodeSubmission:
+        """Submit the PPIFlow app function directly from the orchestrator."""
+        return RemoteNodeSubmission(
+            function_call=self.modal_namespace.ppiflow_run.spawn(
+                **self._app_kwargs(context)
+            ),
+            function_name="ppiflow_run",
         )
 
 
@@ -497,6 +502,7 @@ def submit_ppiflow_workflow(
     force: bool = False,
     wait: bool = True,
     max_parallel: int = 16,
+    dry_run: bool = False,
 ) -> None:
     """Build and submit a PPIFlow workflow from task and step YAML files.
 
@@ -513,14 +519,25 @@ def submit_ppiflow_workflow(
             Modal function call id for asynchronous collection.
         max_parallel: Maximum number of ready workflow nodes to execute
             concurrently in one scheduler wave.
+        dry_run: Print the workflow DAG graph and skip orchestrator execution.
     """
     task_yaml_path = Path(task_yaml).expanduser().resolve()
     steps_yaml_path = Path(steps_yaml).expanduser().resolve()
     resolved_run_id = sanitize_filename(run_id or task_yaml_path.stem)
     task_yaml_bytes = task_yaml_path.read_bytes()
+    steps_yaml_bytes = steps_yaml_path.read_bytes()
     task_doc = _load_yaml_bytes(task_yaml_bytes)
+    if dry_run:
+        workflow = build_ppiflow_workflow(
+            task_yaml_bytes=task_yaml_bytes,
+            steps_yaml_bytes=steps_yaml_bytes,
+            stage=stage,
+        )
+        print_workflow_dag(workflow.validate())
+        return
+
     steps_doc = _stage_ppiflow_app_inputs(
-        steps_doc=_load_yaml_bytes(steps_yaml_path.read_bytes()),
+        steps_doc=_load_yaml_bytes(steps_yaml_bytes),
         run_id=resolved_run_id,
         app_steps=_active_ppiflow_app_steps(task_doc, stage),
     )
